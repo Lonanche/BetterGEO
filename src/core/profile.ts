@@ -1,0 +1,64 @@
+import type { PageEvents } from './page';
+import type { Scope } from './scope';
+import { viewedProfileId } from '../geoguessr/routes';
+/** One read per profile visit, with common stale-response and remount handling. */
+export function watchProfile<T>(
+  events: PageEvents,
+  scope: Scope,
+  options: {
+    name: string;
+    target(): Element | null | undefined;
+    load(userId: string): Promise<T>;
+    render(data: T, userId: string, target: Element): void;
+    reset(): void;
+  },
+) {
+  let user: string | undefined,
+    visit = 0,
+    attempted = false,
+    loading = false;
+  let data: T | undefined;
+  scope.own(() => {
+    visit++;
+    options.reset();
+  });
+  scope.own(
+    events.subscribe(async () => {
+      const id = viewedProfileId();
+      if (id !== user) {
+        visit++;
+        user = id;
+        attempted = false;
+        loading = false;
+        data = undefined;
+        options.reset();
+      }
+      if (!id || !document.head || loading) return;
+      const target = options.target();
+      if (!target) return;
+      const current = visit;
+      const valid = () => scope.active && current === visit && viewedProfileId() === id;
+      if (!attempted) {
+        attempted = true;
+        loading = true;
+        try {
+          const result = await options.load(id);
+          if (valid()) data = result;
+        } catch (error) {
+          if (valid()) console.error(`[BetterGEO ${options.name}]`, error);
+        } finally {
+          if (visit === current) loading = false;
+        }
+      }
+      if (!valid() || data === undefined) return;
+      const latest = options.target();
+      if (latest?.isConnected) options.render(data, id, latest);
+    }),
+  );
+}
+export function profileWidgets() {
+  return (
+    document.querySelector('[class*="profile-v2_staticWidgets__"]') ||
+    document.querySelector('[class*="profile-v2_widgetRow__"]')?.parentElement
+  );
+}
