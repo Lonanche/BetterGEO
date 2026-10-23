@@ -4,9 +4,8 @@ import { element } from '../core/dom';
 import { nativeStyles } from '../core/native-styles';
 import { racePlayer } from './race-player';
 import type { RaceParticipant } from '../geoguessr/online-race';
-import type { RaceRatings } from '../geoguessr/race-ratings';
 
-interface Snapshot extends RaceRatings {
+interface Snapshot {
   players: Map<string, RaceParticipant>;
   loadedAt: number;
 }
@@ -15,10 +14,8 @@ interface Snapshot extends RaceRatings {
 export function installRaceLeaderboard(
   { api, events }: Services,
   scope: Scope,
-  knownPlayers: () => Map<string, RaceParticipant> | undefined,
   acceptPlayers: (players: Map<string, RaceParticipant>) => void,
 ) {
-  let cache: Snapshot | undefined;
   let mounted: { tabs: Element; shell: Element; content: Element; scope: Scope } | undefined;
   const style = element('style');
   style.textContent = CSS;
@@ -91,12 +88,12 @@ export function installRaceLeaderboard(
       icon.setAttribute('aria-hidden', 'true');
       const updated = element('span', 'bettergeo-race-updated');
       updated.title =
-        'Ratings are cached for 5 minutes. Click the refresh button to fetch the latest ratings.';
+        'Standings update every 5 minutes. The refresh button reloads the shared server cache.';
       updated.tabIndex = 0;
       const refresh = element('button', 'bettergeo-race-refresh');
       refresh.type = 'button';
-      refresh.title = 'Refresh ratings';
-      refresh.setAttribute('aria-label', 'Refresh race ratings');
+      refresh.title = 'Reload cached standings';
+      refresh.setAttribute('aria-label', 'Reload race standings');
       const refreshIcon = icon;
       const arrow = document.createElementNS(icon.namespaceURI, 'path');
       arrow.setAttribute(
@@ -110,20 +107,54 @@ export function installRaceLeaderboard(
       const retry = element('button', `${template.className} bettergeo-race-retry`, 'Retry');
       retry.type = 'button';
       retry.hidden = true;
-      const board = element('div', c('global-leaderboard_leaderboard__mx2Iy'));
+      const board = element(
+        'div',
+        `${c('global-leaderboard_leaderboard__mx2Iy')} bettergeo-race-board`,
+      );
       const headerTable = element(
         'table',
         `${c('global-leaderboard_table__6Y95Y')} bettergeo-race-table`,
       );
+      // Both tables share fixed column tracks so points align with their headers.
+      const columns = () => {
+        const group = element('colgroup');
+        for (const width of ['44px', '56px', '', '80px', '82px', '76px']) {
+          const col = element('col');
+          if (width) col.style.width = width;
+          group.append(col);
+        }
+        return group;
+      };
+      headerTable.append(columns());
       const head = element('thead');
       const headers = element('tr');
-      for (const [label, className] of [
-        ['', 'global-leaderboard_rankHead___zVjK'],
-        ['Name', 'global-leaderboard_playerHead__l5F01'],
-        ['Rating', 'global-leaderboard_ratingHead__Q5Xbt'],
+      const orderHeader = element('th', c('global-leaderboard_rankHead___zVjK'), '#');
+      orderHeader.scope = 'col';
+      orderHeader.title = 'Position in the current sort order';
+      headers.append(orderHeader);
+      for (const [label, className, key] of [
+        ['Proj.', 'global-leaderboard_rankHead___zVjK', 'projected'],
+        ['Name', 'global-leaderboard_playerHead__l5F01', 'name'],
+        ['Elo', 'global-leaderboard_ratingHead__Q5Xbt', 'elo'],
+        ['Proj. pts', 'global-leaderboard_ratingHead__Q5Xbt', 'total'],
+        ['Wk pts', 'global-leaderboard_ratingHead__Q5Xbt', 'week'],
       ]) {
-        const th = element('th', c(className!), label);
-        if (!label) th.setAttribute('aria-label', 'Rating rank');
+        const th = element('th', c(className!));
+        const sortButton = element('button', 'bettergeo-race-sort-header', label);
+        sortButton.type = 'button';
+        sortButton.dataset.bettergeoRaceSort = key!;
+        cycle.listen(sortButton, 'click', () => {
+          direction = sort === key ? -direction : key === 'projected' || key === 'name' ? 1 : -1;
+          sort = key!;
+          render();
+        });
+        th.append(sortButton);
+        if (key === 'elo') th.setAttribute('aria-sort', 'descending');
+        if (label === 'Proj.') th.title = 'Projected regional position';
+        if (label === 'Proj. pts')
+          th.title = 'Projected total: official completed weeks plus the snapshot week';
+        if (label === 'Wk pts')
+          th.title = 'Projected points for the snapshot week; requires at least 10 games';
         th.scope = 'col';
         if (label === 'Name') th.append(metadata);
         headers.append(th);
@@ -135,7 +166,7 @@ export function installRaceLeaderboard(
         `${c('global-leaderboard_table__6Y95Y')} bettergeo-race-table`,
       );
       const body = element('tbody');
-      table.append(body);
+      table.append(columns(), body);
       const results = element(
         'div',
         `${c('global-leaderboard_rows__OlmnP')} bettergeo-race-results`,
@@ -150,7 +181,10 @@ export function installRaceLeaderboard(
       content.append(panel);
       let active = false;
       let region = 'All';
+      let sort = 'elo';
+      let direction = -1;
       let snapshot: Snapshot | undefined;
+      let refreshFailed = false;
       let request: AbortController | undefined;
       const nativeAttributes = new Map<Element, (string | null)[]>();
       const attributeNames = ['aria-selected', 'data-state', 'tabindex'];
@@ -160,27 +194,55 @@ export function installRaceLeaderboard(
         const entries = [...snapshot.players].filter(
           ([, player]) => region === 'All' || player.region === region,
         );
-        entries.sort(([a, pa], [b, pb]) => {
-          const ra = snapshot!.ratings.get(a),
-            rb = snapshot!.ratings.get(b);
-          if (ra === undefined) return rb === undefined ? pa.nick.localeCompare(pb.nick) : 1;
-          if (rb === undefined) return -1;
-          return rb - ra || pa.nick.localeCompare(pb.nick);
+        const value = (player: RaceParticipant) =>
+          sort === 'elo'
+            ? player.rating
+            : sort === 'projected'
+              ? (player.projection?.position ?? player.position)
+              : sort === 'total'
+                ? player.projection?.total
+                : sort === 'week'
+                  ? player.projection?.weekPoints
+                  : player.nick;
+        entries.sort(([, a], [, b]) => {
+          const va = value(a),
+            vb = value(b);
+          // Unavailable values stay last in either direction.
+          if (va === undefined) return vb === undefined ? a.nick.localeCompare(b.nick) : 1;
+          if (vb === undefined) return -1;
+          const difference =
+            typeof va === 'string' && typeof vb === 'string'
+              ? va.localeCompare(vb)
+              : Number(va) - Number(vb);
+          return difference * direction || a.nick.localeCompare(b.nick);
         });
+        for (const th of headers.querySelectorAll('th')) {
+          const key = th.querySelector<HTMLElement>('[data-bettergeo-race-sort]')?.dataset
+            .bettergeoRaceSort;
+          if (key === sort)
+            th.setAttribute('aria-sort', direction === 1 ? 'ascending' : 'descending');
+          else th.removeAttribute('aria-sort');
+        }
         const nativeBoard =
           [...content!.querySelectorAll('[class*="global-leaderboard_leaderboard__"]')].find(
             (node) => !panel.contains(node),
           ) ?? null;
         const fragment = document.createDocumentFragment();
         for (const [index, [id, player]] of entries.entries()) {
-          const rating = snapshot.ratings.get(id);
+          const rating = player.rating;
           const row = element('tr', c('global-leaderboard-row_row__Vk0Dt'));
+          const orderCell = element('td', c('global-leaderboard-row_rankCell__rhsqZ'));
+          orderCell.append(
+            element('div', c('global-leaderboard-row_rank__UxnQx'), String(index + 1)),
+          );
+          orderCell.title = 'Position in the current sort order';
           const rankCell = element('td', c('global-leaderboard-row_rankCell__rhsqZ'));
+          rankCell.title = 'Projected regional position';
           rankCell.append(
             element(
               'div',
               c('global-leaderboard-row_rank__UxnQx'),
-              rating === undefined ? '—' : String(index + 1),
+              String(player.projection?.position ?? player.position ?? '—'),
             ),
           );
           const name = element('td', c('global-leaderboard-row_playerCell__8Gl9V'));
@@ -193,13 +255,37 @@ export function installRaceLeaderboard(
               rating === undefined ? 'N/A' : rating.toLocaleString(),
             ),
           );
-          row.append(rankCell, name, ratingCell);
+          const totalCell = element(
+            'td',
+            `${c('global-leaderboard-row_ratingCell__CSoq3')} bettergeo-race-points`,
+          );
+          totalCell.textContent = player.projection?.total.toLocaleString() ?? 'N/A';
+          totalCell.title = 'Projected total points if the snapshot week ended now';
+          const weekCell = element(
+            'td',
+            `${c('global-leaderboard-row_ratingCell__CSoq3')} bettergeo-race-points`,
+          );
+          weekCell.textContent = player.projection?.weekPoints.toLocaleString() ?? 'N/A';
+          weekCell.title = player.projection
+            ? `Week ${player.projection.weekIndex + 1}: projected points · ${player.projection.gamesWeek} games played`
+            : 'Weekly projection unavailable';
+          row.append(orderCell, rankCell, name, ratingCell, totalCell, weekCell);
           fragment.append(row);
         }
         body.replaceChildren(fragment);
         updated.textContent = `Updated ${new Date(snapshot.loadedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-        status.textContent = entries.length ? '' : 'No participants in this region.';
-        status.hidden = entries.length > 0;
+        const projection = snapshot.players.values().next().value?.projection;
+        updated.title = `Snapshot from ${new Date(snapshot.loadedAt).toLocaleString()}. Standings update every 5 minutes; the refresh button reloads the shared server cache.`;
+        status.textContent = refreshFailed
+          ? 'Could not refresh race standings. Showing the last successful snapshot.'
+          : projection?.waitingForWeek
+            ? 'Waiting for this week’s leaderboard. Showing the previous snapshot.'
+            : projection?.stale
+              ? 'Update delayed. Showing the last successful snapshot.'
+              : entries.length
+                ? ''
+                : 'No participants in this region.';
+        status.hidden = !status.textContent;
       }
 
       for (const label of ['All', 'APAC', 'EMEA', 'Americas']) {
@@ -248,45 +334,32 @@ export function installRaceLeaderboard(
 
       async function load(force = false) {
         request?.abort();
-        if (force) cache = undefined;
         const controller = new AbortController();
         request = controller;
         const signal = controller.signal;
-        snapshot = undefined;
         retry.hidden = true;
         refresh.disabled = true;
         status.hidden = false;
-        board.hidden = true;
+        board.hidden = !snapshot;
         panel.setAttribute('aria-busy', 'true');
-        status.textContent = 'Loading race participants…';
+        status.textContent = snapshot ? 'Refreshing race standings…' : 'Loading race participants…';
         try {
-          const existing = force ? undefined : knownPlayers();
-          const players = existing ?? (await api.onlineRacePlayers(signal));
+          const players = await api.onlineRacePlayers(signal, force);
           signal.throwIfAborted();
-          if (!existing) acceptPlayers(players);
-          const key = [...players.keys()].sort().join(',');
-          if (
-            cache &&
-            Date.now() - cache.loadedAt < 5 * 60_000 &&
-            [...cache.players.keys()].sort().join(',') === key
-          ) {
-            snapshot = { ...cache, players };
-          } else {
-            status.textContent = `Loading ratings · 0 of ${players.size} found…`;
-            const result = await api.onlineRaceRatings(new Set(players.keys()), signal, (found) => {
-              if (!signal.aborted)
-                status.textContent = `Loading ratings · ${found} of ${players.size} found…`;
-            });
-            signal.throwIfAborted();
-            snapshot = { ...result, players, loadedAt: Date.now() };
-            cache = snapshot;
-          }
+          acceptPlayers(players);
+          refreshFailed = false;
+          snapshot = {
+            players,
+            loadedAt: players.values().next().value?.projection?.updatedAt ?? Date.now(),
+          };
           if (!cycle.active || !active) return;
           render();
           board.hidden = false;
         } catch {
           if (!signal.aborted && cycle.active && active) {
-            status.textContent = 'Could not load race ratings. Please try again.';
+            refreshFailed = true;
+            if (snapshot) render();
+            else status.textContent = 'Could not load race standings. Please try again.';
             retry.hidden = false;
           }
         } finally {
@@ -298,8 +371,12 @@ export function installRaceLeaderboard(
         }
       }
 
+      const refreshTimer = setInterval(() => {
+        if (active) void load();
+      }, 5 * 60_000);
+      cycle.own(() => clearInterval(refreshTimer));
       cycle.listen(retry, 'click', () => {
-        void load();
+        void load(true);
       });
       cycle.listen(refresh, 'click', () => {
         void load(true);
@@ -378,4 +455,16 @@ const CSS = `
 .bettergeo-race-panel [class*="global-leaderboard_leaderboard__"] > table { flex: none; }
 .bettergeo-race-results { flex: 1 1 0; min-height: 0; max-height: none; overflow: auto; }
 .bettergeo-race-filters button[aria-pressed="true"] { color: inherit; }
+.bettergeo-race-filters { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
+.bettergeo-race-sort-header { border: 0; padding: 0; background: none; color: inherit; font: inherit; text-transform: inherit; cursor: pointer; white-space: nowrap; }
+.bettergeo-race-sort-header:focus-visible { outline: 1px solid currentColor; outline-offset: 3px; }
+.bettergeo-race-table th[aria-sort] { color: #fff; }
+.bettergeo-race-table th[aria-sort] .bettergeo-race-sort-header::after { margin-left: 3px; font-size: 9px; }
+.bettergeo-race-table th[aria-sort="ascending"] .bettergeo-race-sort-header::after { content: '▲'; }
+.bettergeo-race-table th[aria-sort="descending"] .bettergeo-race-sort-header::after { content: '▼'; }
+.bettergeo-race-board { min-width: 0; overflow-x: auto; }
+.bettergeo-race-table { table-layout: fixed; width: 100%; min-width: 660px; }
+.bettergeo-race-results { min-width: 660px; }
+.bettergeo-race-points { text-align: right; font-variant-numeric: tabular-nums; }
+
 `;

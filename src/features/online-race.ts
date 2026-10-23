@@ -2,27 +2,10 @@ import type { Feature } from '../core/feature';
 import { element } from '../core/dom';
 import type { RaceParticipant } from '../geoguessr/online-race';
 import { installRaceLeaderboard } from './race-leaderboard';
+import { refreshRaceBadge } from './race-badge';
 
 const selector =
   '[class*="global-leaderboard-row_player__"] a[href*="/user/"], [class*="leaderboard"] [class*="player-nick_wrapper__"] a[href*="/user/"]';
-
-function refreshBadge(badge: HTMLElement, player: RaceParticipant) {
-  const text = `${player.region}${player.position === undefined ? '' : ` #${player.position}`}`;
-  const title = [
-    player.name.toLowerCase().includes(player.region.toLowerCase())
-      ? player.name
-      : `${player.name} · ${player.region}`,
-    player.position === undefined ? '' : `Regional position: #${player.position}`,
-    player.total === undefined ? '' : `Total: ${player.total} points`,
-    ...player.points.map((points, index) => `Week ${index + 1}: ${points} points`),
-  ]
-    .filter(Boolean)
-    .join('\n');
-  if (badge.textContent !== text) badge.textContent = text;
-  if (badge.dataset.region !== player.region) badge.dataset.region = player.region;
-  if (badge.title !== title) badge.title = title;
-  if (badge.getAttribute('aria-label') !== title) badge.setAttribute('aria-label', title);
-}
 
 export const onlineRace: Feature = {
   id: 'online-race',
@@ -56,20 +39,17 @@ export const onlineRace: Feature = {
     let retryAt = 0;
     let onDuels = false;
     let generation = 0;
-    installRaceLeaderboard(
-      services,
-      scope,
-      () => players,
-      (result) => {
-        // A manual refresh supersedes any older background participant request.
-        generation++;
-        players = result;
-        loading = false;
-        expires = Date.now() + 5 * 60_000;
-        retryAt = 0;
-        events.schedule();
-      },
-    );
+    installRaceLeaderboard(services, scope, (result) => {
+      // A manual refresh supersedes any older background participant request.
+      generation++;
+      players = result;
+      loading = false;
+      expires = Date.now() + 5 * 60_000;
+      retryAt = 0;
+      events.schedule();
+    });
+    const refreshTimer = setInterval(() => events.schedule(), 5 * 60_000);
+    scope.own(() => clearInterval(refreshTimer));
     scope.own(() => {
       badges.forEach((badge) => badge.remove());
       badges.clear();
@@ -106,7 +86,7 @@ export const onlineRace: Feature = {
             badge.remove();
             badges.delete(link);
           } else {
-            refreshBadge(badge, player);
+            refreshRaceBadge(badge, player);
             const container = badge.parentElement!;
             if (container.lastElementChild !== badge) container.append(badge);
           }
@@ -117,7 +97,7 @@ export const onlineRace: Feature = {
           loading = true;
           const requestGeneration = generation;
           void api
-            .onlineRacePlayers()
+            .onlineRacePlayers(scope.signal)
             .then((result) => {
               if (!scope.active || requestGeneration !== generation) return;
               players = result;
@@ -140,7 +120,7 @@ export const onlineRace: Feature = {
           const player = id ? players.get(id) : undefined;
           if (!player) continue;
           const badge = element('span', 'bettergeo-online-race');
-          refreshBadge(badge, player);
+          refreshRaceBadge(badge, player);
           badge.tabIndex = 0;
           (link.closest('[class*="player-nick_wrapper__"]') ?? link.parentElement)?.append(badge);
           badges.set(link, badge);

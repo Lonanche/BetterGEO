@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BetterGEO
 // @namespace    BetterGEO
-// @version      0.2.0
+// @version      0.2.1
 // @description  Toggleable GeoGuessr improvements: ELO Race leaderboard and badges, old duel summaries, map result links, hidden recent duels, profile restrictions, country ranked stats, random maps, and tournaments.
 // @author       trausi
 // @homepageURL  https://github.com/lonanche/BetterGEO
@@ -18,6 +18,7 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @connect      game-server.geoguessr.com
+// @connect      elorace.lonanche.workers.dev
 // @noframes
 // ==/UserScript==
 "use strict";
@@ -585,63 +586,159 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     }
   };
 
-  // src/geoguessr/online-race.ts
-  function onlineRacePlayers(html) {
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    const data = JSON.parse(doc.querySelector("#__NEXT_DATA__")?.textContent ?? "null");
-    const race = data?.props?.pageProps?.race;
-    if (!race || typeof race !== "object" || Array.isArray(race))
-      throw new Error("Online race standings unavailable.");
+  // src/geoguessr/race-tracker.ts
+  var raceTrackerUrl = "https://elorace.lonanche.workers.dev";
+  var raceTrackerApi = `${raceTrackerUrl}/api/v1/standings`;
+  var FIVE_MINUTES = 3e5;
+  function object(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error("Unexpected race tracker data.");
+    return value;
+  }
+  function integer(value, minimum = 0) {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum)
+      throw new Error("Invalid race tracker number.");
+    return value;
+  }
+  function optionalInteger(value) {
+    return value === null ? void 0 : integer(value);
+  }
+  function raceTrackerPlayers(data, now = Date.now()) {
+    const root = object(data);
+    const updatedAt = integer(root.updatedAt, 1);
+    if (root.schemaVersion !== 1 || updatedAt > now + FIVE_MINUTES || typeof root.stale !== "boolean" || typeof root.completed !== "boolean" || !Array.isArray(root.players) || !root.players.length || root.players.length > 1e3)
+      throw new Error("Unexpected race tracker snapshot.");
+    const weekIndex = integer(root.weekIndex);
+    if (weekIndex > 3) throw new Error("Invalid race week.");
+    const waitingForWeek = root.waitingForWeek === null ? null : integer(root.waitingForWeek, 1);
+    const stale = root.stale || !root.completed && now - updatedAt > 2 * FIVE_MINUTES;
     const players = /* @__PURE__ */ new Map();
-    for (const [region, value] of Object.entries(race)) {
-      if (!value || typeof value !== "object" || !("players" in value) || !Array.isArray(value.players))
-        throw new Error("Unexpected online race standings.");
-      for (const player of value.players) {
-        if (!player || typeof player.id !== "string" || !/^[a-f0-9]{24}$/i.test(player.id))
-          throw new Error("Unexpected online race player.");
-        players.set(player.id, {
-          region: region === "Apac" ? "APAC" : region === "Emea" ? "EMEA" : region,
-          name: typeof value.name === "string" ? value.name : "World League online race",
-          nick: typeof player.nick === "string" ? player.nick : typeof player.alias === "string" ? player.alias : player.id,
-          avatar: typeof player.avatar === "string" && /^pin\/[\w.-]+$/.test(player.avatar) ? player.avatar : void 0,
-          countryCode: typeof player.countryCode === "string" && /^[a-z]{2}$/i.test(player.countryCode) ? player.countryCode.toLowerCase() : void 0,
-          position: Number.isInteger(player.position) && player.position > 0 ? player.position : void 0,
-          total: typeof player.total === "number" && Number.isFinite(player.total) ? player.total : void 0,
-          points: Array.isArray(player.points) ? player.points.filter(
-            (point) => typeof point === "number" && Number.isFinite(point)
-          ) : []
+    for (const value of root.players) {
+      const p = object(value);
+      if (typeof p.id !== "string" || !/^[a-f0-9]{24}$/i.test(p.id) || players.has(p.id) || typeof p.nick !== "string" || p.nick.length > 200 || !["EMEA", "APAC", "Americas"].includes(String(p.region)) || !Array.isArray(p.points) || p.points.length !== 4 || typeof p.eligible !== "boolean")
+        throw new Error("Invalid race tracker player.");
+      const games = integer(p.gamesPlayed), weekPoints = integer(p.weekPoints);
+      if (games < 10 && weekPoints !== 0 || p.eligible !== games >= 10)
+        throw new Error("Invalid race eligibility.");
+      const projection = {
+        position: integer(p.position, 1),
+        total: integer(p.projectedPoints),
+        weekPoints,
+        weekIndex,
+        gamesWeek: String(games),
+        updatedAt,
+        stale,
+        waitingForWeek,
+        completed: root.completed
+      };
+      const official = p.officialPosition === null ? void 0 : integer(p.officialPosition, 1);
+      players.set(p.id, {
+        region: String(p.region),
+        name: `World League 2027 race - ${p.region}`,
+        nick: p.nick,
+        avatar: typeof p.avatar === "string" && /^pin\/[\w.-]+$/.test(p.avatar) ? p.avatar : void 0,
+        countryCode: typeof p.countryCode === "string" && /^[a-z]{2}$/i.test(p.countryCode) ? p.countryCode.toLowerCase() : void 0,
+        position: official,
+        total: integer(p.officialPoints),
+        points: p.points.map((n) => integer(n)),
+        rating: optionalInteger(p.rating),
+        projection
+      });
+    }
+    const nextRefreshAt = integer(root.nextRefreshAt, 1);
+    return {
+      players,
+      expires: stale ? now + 6e4 : Math.min(now + FIVE_MINUTES, Math.max(now + 1e4, nextRefreshAt))
+    };
+  }
+  function requestSnapshot(signal) {
+    return new Promise((resolve, reject) => {
+      signal.throwIfAborted();
+      let request;
+      let settled = false;
+      const finish = (error, value) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", abort);
+        if (error) reject(error);
+        else resolve(value);
+      };
+      const abort = () => {
+        finish(new Error("Race tracker request aborted."));
+        request?.abort();
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      try {
+        request = GM_xmlhttpRequest({
+          method: "GET",
+          url: raceTrackerApi,
+          timeout: 2e4,
+          anonymous: true,
+          onload(response) {
+            try {
+              if (response.status !== 200) throw new Error(`Race tracker: HTTP ${response.status}`);
+              if (response.responseText.length > 2e6)
+                throw new Error("Race tracker response is too large.");
+              finish(void 0, JSON.parse(response.responseText));
+            } catch (error) {
+              finish(error instanceof Error ? error : new Error("Invalid race tracker response."));
+            }
+          },
+          onerror: () => finish(new Error("Race tracker request failed.")),
+          ontimeout: () => finish(new Error("Race tracker request timed out.")),
+          onabort: () => finish(new Error("Race tracker request aborted."))
         });
+      } catch {
+        finish(new Error("Race tracker request failed."));
       }
-    }
-    return players;
+    });
   }
-
-  // src/geoguessr/race-ratings.ts
-  var raceRatingsPageSize = 100;
-  var raceRatingsMaxPages = 20;
-  async function collectRaceRatings(players, page2, signal, progress = () => {
-  }) {
-    const ratings = /* @__PURE__ */ new Map();
-    const seen = /* @__PURE__ */ new Set();
-    let scanned = 0;
-    for (let index = 0; index < raceRatingsMaxPages && ratings.size < players.size; index++) {
-      signal.throwIfAborted();
-      const data = await page2(index * raceRatingsPageSize, raceRatingsPageSize);
-      signal.throwIfAborted();
-      if (!Array.isArray(data)) throw new Error("Unexpected global leaderboard response.");
-      const before = seen.size;
-      for (const row of data) {
-        if (!row || typeof row.userId !== "string" || typeof row.rating !== "number" || !Number.isFinite(row.rating))
-          throw new Error("Unexpected global leaderboard player.");
-        seen.add(row.userId);
-        if (players.has(row.userId)) ratings.set(row.userId, row.rating);
+  var RaceTrackerClient = class {
+    cache;
+    pending;
+    get(signal, force = false) {
+      if (signal?.aborted) return Promise.reject(new Error("Race tracker request aborted."));
+      if (!force && this.cache && this.cache.expires > Date.now())
+        return Promise.resolve(this.cache.players);
+      let pending = this.pending;
+      if (!pending) {
+        const controller = new AbortController();
+        pending = { controller, readers: 0, promise: Promise.resolve(/* @__PURE__ */ new Map()) };
+        const current2 = pending;
+        current2.promise = requestSnapshot(controller.signal).then((data) => {
+          controller.signal.throwIfAborted();
+          const parsed = raceTrackerPlayers(data);
+          this.cache = parsed;
+          return parsed.players;
+        }).finally(() => {
+          if (this.pending === current2) this.pending = void 0;
+        });
+        this.pending = current2;
       }
-      scanned += data.length;
-      progress(ratings.size, scanned);
-      if (data.length < raceRatingsPageSize || seen.size === before) break;
+      const current = pending;
+      current.readers++;
+      return new Promise((resolve, reject) => {
+        let finished = false;
+        const finish = (error, players) => {
+          if (finished) return;
+          finished = true;
+          signal?.removeEventListener("abort", abort);
+          if (--current.readers === 0 && this.pending === current) {
+            this.pending = void 0;
+            current.controller.abort();
+          }
+          if (error) reject(error);
+          else resolve(players);
+        };
+        const abort = () => finish(new Error("Race tracker request aborted."));
+        signal?.addEventListener("abort", abort, { once: true });
+        current.promise.then(
+          (players) => finish(void 0, players),
+          (error) => finish(error)
+        );
+      });
     }
-    return { ratings, scanned };
-  }
+  };
 
   // src/geoguessr/api.ts
   var RequestCache = class {
@@ -673,26 +770,9 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     }
     scores = new ScoreIndex();
     cache = new RequestCache();
-    async onlineRacePlayers(signal) {
-      const response = await this.page.fetch("/world-championship", {
-        credentials: "same-origin",
-        cache: "no-store",
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(2e4)]) : AbortSignal.timeout(2e4)
-      });
-      if (!response.ok) throw new Error(`Online race: HTTP ${response.status}`);
-      return onlineRacePlayers(await response.text());
-    }
-    onlineRaceRatings(players, signal, progress) {
-      return collectRaceRatings(
-        players,
-        (offset, limit) => this.json(
-          `/api/v4/ranked-system/ratings?offset=${offset}&limit=${limit}`,
-          "Global leaderboard",
-          { signal: AbortSignal.any([signal, AbortSignal.timeout(2e4)]), cache: "no-store" }
-        ),
-        signal,
-        progress
-      );
+    raceTracker = new RaceTrackerClient();
+    onlineRacePlayers(signal, force = false) {
+      return this.raceTracker.get(signal, force);
     }
     async json(path2, label, options = {}) {
       const response = await this.page.fetch(path2, {
@@ -2763,6 +2843,38 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
 }
 `;
 
+  // src/features/race-badge.ts
+  function refreshRaceBadge(badge, player) {
+    const projection = player.projection;
+    const position = projection?.position ?? player.position;
+    const stale = projection && (projection.stale || !projection.completed && Date.now() - projection.updatedAt > 10 * 6e4);
+    const text = `${player.region}${position === void 0 ? "" : ` #${position}`}`;
+    const title = [
+      player.name.toLowerCase().includes(player.region.toLowerCase()) ? player.name : `${player.name} \xB7 ${player.region}`,
+      ...projection ? [
+        ...projection.waitingForWeek ? ["Waiting for this week\u2019s leaderboard; showing the previous week."] : [],
+        ...stale ? ["Update delayed: these projections are based on an older snapshot."] : [],
+        `Projected regional position: #${projection.position} (unofficial)`,
+        projection.completed ? `Completed week ${projection.weekIndex + 1} snapshot; requires at least 10 ranked games.` : `If week ${projection.weekIndex + 1} ended now; requires at least 10 ranked games in that week.`,
+        `Projected total: ${projection.total} points`
+      ] : ["Official standings (projection unavailable)."],
+      player.position === void 0 ? "" : `Official regional position: #${player.position}`,
+      player.total === void 0 ? "" : `Total: ${player.total} points (official)`,
+      ...player.points.slice(0, projection ? projection.weekIndex : player.points.length).map((points, index) => `Week ${index + 1}: ${points} points (official)`),
+      ...projection ? [
+        `Week ${projection.weekIndex + 1}: ${projection.weekPoints} points (${projection.completed ? "completed snapshot" : "projected"}) \xB7 Games played: ${projection.gamesWeek}`,
+        `Projection updated: ${new Date(projection.updatedAt).toLocaleString()}`,
+        `Source: elorace \xB7 ${raceTrackerUrl}`
+      ] : []
+    ].filter(Boolean).join("\n");
+    if (badge.textContent !== text) badge.textContent = text;
+    if (badge.dataset.region !== player.region) badge.dataset.region = player.region;
+    const source = projection ? "projection" : "official";
+    if (badge.dataset.source !== source) badge.dataset.source = source;
+    if (badge.title !== title) badge.title = title;
+    if (badge.getAttribute("aria-label") !== title) badge.setAttribute("aria-label", title);
+  }
+
   // src/features/race-player.ts
   function racePlayer(id, player, c, nativeBoard) {
     const nativeLink = nativeBoard?.querySelector(`a[href$="/user/${id}"]`);
@@ -2824,26 +2936,15 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
         )
       );
     }
-    const badge = element(
-      "span",
-      "bettergeo-online-race",
-      `${player.region}${player.position === void 0 ? "" : ` #${player.position}`}`
-    );
-    badge.dataset.region = player.region;
-    badge.title = [
-      player.name.toLowerCase().includes(player.region.toLowerCase()) ? player.name : `${player.name} \xB7 ${player.region}`,
-      player.position === void 0 ? "" : `Regional position: #${player.position}`,
-      player.total === void 0 ? "" : `Total: ${player.total} points`,
-      ...player.points.map((points, index) => `Week ${index + 1}: ${points} points`)
-    ].filter(Boolean).join("\n");
+    const badge = element("span", "bettergeo-online-race");
+    refreshRaceBadge(badge, player);
     badge.tabIndex = 0;
     identity.append(badge);
     return identity;
   }
 
   // src/features/race-leaderboard.ts
-  function installRaceLeaderboard({ api: api2, events: events2 }, scope, knownPlayers, acceptPlayers) {
-    let cache;
+  function installRaceLeaderboard({ api: api2, events: events2 }, scope, acceptPlayers) {
     let mounted;
     const style = element("style");
     style.textContent = CSS5;
@@ -2907,12 +3008,12 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
         icon.setAttribute("stroke-width", "2");
         icon.setAttribute("aria-hidden", "true");
         const updated = element("span", "bettergeo-race-updated");
-        updated.title = "Ratings are cached for 5 minutes. Click the refresh button to fetch the latest ratings.";
+        updated.title = "Standings update every 5 minutes. The refresh button reloads the shared server cache.";
         updated.tabIndex = 0;
         const refresh = element("button", "bettergeo-race-refresh");
         refresh.type = "button";
-        refresh.title = "Refresh ratings";
-        refresh.setAttribute("aria-label", "Refresh race ratings");
+        refresh.title = "Reload cached standings";
+        refresh.setAttribute("aria-label", "Reload race standings");
         const refreshIcon = icon;
         const arrow2 = document.createElementNS(icon.namespaceURI, "path");
         arrow2.setAttribute(
@@ -2926,20 +3027,53 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
         const retry = element("button", `${template.className} bettergeo-race-retry`, "Retry");
         retry.type = "button";
         retry.hidden = true;
-        const board = element("div", c("global-leaderboard_leaderboard__mx2Iy"));
+        const board = element(
+          "div",
+          `${c("global-leaderboard_leaderboard__mx2Iy")} bettergeo-race-board`
+        );
         const headerTable = element(
           "table",
           `${c("global-leaderboard_table__6Y95Y")} bettergeo-race-table`
         );
+        const columns = () => {
+          const group = element("colgroup");
+          for (const width of ["44px", "56px", "", "80px", "82px", "76px"]) {
+            const col = element("col");
+            if (width) col.style.width = width;
+            group.append(col);
+          }
+          return group;
+        };
+        headerTable.append(columns());
         const head = element("thead");
         const headers = element("tr");
-        for (const [label, className] of [
-          ["", "global-leaderboard_rankHead___zVjK"],
-          ["Name", "global-leaderboard_playerHead__l5F01"],
-          ["Rating", "global-leaderboard_ratingHead__Q5Xbt"]
+        const orderHeader = element("th", c("global-leaderboard_rankHead___zVjK"), "#");
+        orderHeader.scope = "col";
+        orderHeader.title = "Position in the current sort order";
+        headers.append(orderHeader);
+        for (const [label, className, key] of [
+          ["Proj.", "global-leaderboard_rankHead___zVjK", "projected"],
+          ["Name", "global-leaderboard_playerHead__l5F01", "name"],
+          ["Elo", "global-leaderboard_ratingHead__Q5Xbt", "elo"],
+          ["Proj. pts", "global-leaderboard_ratingHead__Q5Xbt", "total"],
+          ["Wk pts", "global-leaderboard_ratingHead__Q5Xbt", "week"]
         ]) {
-          const th = element("th", c(className), label);
-          if (!label) th.setAttribute("aria-label", "Rating rank");
+          const th = element("th", c(className));
+          const sortButton = element("button", "bettergeo-race-sort-header", label);
+          sortButton.type = "button";
+          sortButton.dataset.bettergeoRaceSort = key;
+          cycle.listen(sortButton, "click", () => {
+            direction = sort === key ? -direction : key === "projected" || key === "name" ? 1 : -1;
+            sort = key;
+            render();
+          });
+          th.append(sortButton);
+          if (key === "elo") th.setAttribute("aria-sort", "descending");
+          if (label === "Proj.") th.title = "Projected regional position";
+          if (label === "Proj. pts")
+            th.title = "Projected total: official completed weeks plus the snapshot week";
+          if (label === "Wk pts")
+            th.title = "Projected points for the snapshot week; requires at least 10 games";
           th.scope = "col";
           if (label === "Name") th.append(metadata);
           headers.append(th);
@@ -2951,7 +3085,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
           `${c("global-leaderboard_table__6Y95Y")} bettergeo-race-table`
         );
         const body = element("tbody");
-        table.append(body);
+        table.append(columns(), body);
         const results = element(
           "div",
           `${c("global-leaderboard_rows__OlmnP")} bettergeo-race-results`
@@ -2966,7 +3100,10 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
         content.append(panel);
         let active = false;
         let region = "All";
+        let sort = "elo";
+        let direction = -1;
         let snapshot;
+        let refreshFailed = false;
         let request;
         const nativeAttributes = /* @__PURE__ */ new Map();
         const attributeNames = ["aria-selected", "data-state", "tabindex"];
@@ -2975,25 +3112,39 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
           const entries = [...snapshot.players].filter(
             ([, player]) => region === "All" || player.region === region
           );
-          entries.sort(([a, pa], [b, pb]) => {
-            const ra = snapshot.ratings.get(a), rb = snapshot.ratings.get(b);
-            if (ra === void 0) return rb === void 0 ? pa.nick.localeCompare(pb.nick) : 1;
-            if (rb === void 0) return -1;
-            return rb - ra || pa.nick.localeCompare(pb.nick);
+          const value = (player) => sort === "elo" ? player.rating : sort === "projected" ? player.projection?.position ?? player.position : sort === "total" ? player.projection?.total : sort === "week" ? player.projection?.weekPoints : player.nick;
+          entries.sort(([, a], [, b]) => {
+            const va = value(a), vb = value(b);
+            if (va === void 0) return vb === void 0 ? a.nick.localeCompare(b.nick) : 1;
+            if (vb === void 0) return -1;
+            const difference = typeof va === "string" && typeof vb === "string" ? va.localeCompare(vb) : Number(va) - Number(vb);
+            return difference * direction || a.nick.localeCompare(b.nick);
           });
+          for (const th of headers.querySelectorAll("th")) {
+            const key = th.querySelector("[data-bettergeo-race-sort]")?.dataset.bettergeoRaceSort;
+            if (key === sort)
+              th.setAttribute("aria-sort", direction === 1 ? "ascending" : "descending");
+            else th.removeAttribute("aria-sort");
+          }
           const nativeBoard = [...content.querySelectorAll('[class*="global-leaderboard_leaderboard__"]')].find(
             (node) => !panel.contains(node)
           ) ?? null;
           const fragment = document.createDocumentFragment();
           for (const [index, [id, player]] of entries.entries()) {
-            const rating = snapshot.ratings.get(id);
+            const rating = player.rating;
             const row = element("tr", c("global-leaderboard-row_row__Vk0Dt"));
+            const orderCell = element("td", c("global-leaderboard-row_rankCell__rhsqZ"));
+            orderCell.append(
+              element("div", c("global-leaderboard-row_rank__UxnQx"), String(index + 1))
+            );
+            orderCell.title = "Position in the current sort order";
             const rankCell = element("td", c("global-leaderboard-row_rankCell__rhsqZ"));
+            rankCell.title = "Projected regional position";
             rankCell.append(
               element(
                 "div",
                 c("global-leaderboard-row_rank__UxnQx"),
-                rating === void 0 ? "\u2014" : String(index + 1)
+                String(player.projection?.position ?? player.position ?? "\u2014")
               )
             );
             const name = element("td", c("global-leaderboard-row_playerCell__8Gl9V"));
@@ -3006,13 +3157,27 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
                 rating === void 0 ? "N/A" : rating.toLocaleString()
               )
             );
-            row.append(rankCell, name, ratingCell);
+            const totalCell = element(
+              "td",
+              `${c("global-leaderboard-row_ratingCell__CSoq3")} bettergeo-race-points`
+            );
+            totalCell.textContent = player.projection?.total.toLocaleString() ?? "N/A";
+            totalCell.title = "Projected total points if the snapshot week ended now";
+            const weekCell = element(
+              "td",
+              `${c("global-leaderboard-row_ratingCell__CSoq3")} bettergeo-race-points`
+            );
+            weekCell.textContent = player.projection?.weekPoints.toLocaleString() ?? "N/A";
+            weekCell.title = player.projection ? `Week ${player.projection.weekIndex + 1}: projected points \xB7 ${player.projection.gamesWeek} games played` : "Weekly projection unavailable";
+            row.append(orderCell, rankCell, name, ratingCell, totalCell, weekCell);
             fragment.append(row);
           }
           body.replaceChildren(fragment);
           updated.textContent = `Updated ${new Date(snapshot.loadedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
-          status.textContent = entries.length ? "" : "No participants in this region.";
-          status.hidden = entries.length > 0;
+          const projection = snapshot.players.values().next().value?.projection;
+          updated.title = `Snapshot from ${new Date(snapshot.loadedAt).toLocaleString()}. Standings update every 5 minutes; the refresh button reloads the shared server cache.`;
+          status.textContent = refreshFailed ? "Could not refresh race standings. Showing the last successful snapshot." : projection?.waitingForWeek ? "Waiting for this week\u2019s leaderboard. Showing the previous snapshot." : projection?.stale ? "Update delayed. Showing the last successful snapshot." : entries.length ? "" : "No participants in this region.";
+          status.hidden = !status.textContent;
         }
         for (const label of ["All", "APAC", "EMEA", "Americas"]) {
           const filter = element("button", c("tabs_trigger__KOf2y"), label);
@@ -3057,41 +3222,32 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
         }
         async function load(force = false) {
           request?.abort();
-          if (force) cache = void 0;
           const controller = new AbortController();
           request = controller;
           const signal = controller.signal;
-          snapshot = void 0;
           retry.hidden = true;
           refresh.disabled = true;
           status.hidden = false;
-          board.hidden = true;
+          board.hidden = !snapshot;
           panel.setAttribute("aria-busy", "true");
-          status.textContent = "Loading race participants\u2026";
+          status.textContent = snapshot ? "Refreshing race standings\u2026" : "Loading race participants\u2026";
           try {
-            const existing = force ? void 0 : knownPlayers();
-            const players = existing ?? await api2.onlineRacePlayers(signal);
+            const players = await api2.onlineRacePlayers(signal, force);
             signal.throwIfAborted();
-            if (!existing) acceptPlayers(players);
-            const key = [...players.keys()].sort().join(",");
-            if (cache && Date.now() - cache.loadedAt < 5 * 6e4 && [...cache.players.keys()].sort().join(",") === key) {
-              snapshot = { ...cache, players };
-            } else {
-              status.textContent = `Loading ratings \xB7 0 of ${players.size} found\u2026`;
-              const result = await api2.onlineRaceRatings(new Set(players.keys()), signal, (found) => {
-                if (!signal.aborted)
-                  status.textContent = `Loading ratings \xB7 ${found} of ${players.size} found\u2026`;
-              });
-              signal.throwIfAborted();
-              snapshot = { ...result, players, loadedAt: Date.now() };
-              cache = snapshot;
-            }
+            acceptPlayers(players);
+            refreshFailed = false;
+            snapshot = {
+              players,
+              loadedAt: players.values().next().value?.projection?.updatedAt ?? Date.now()
+            };
             if (!cycle.active || !active) return;
             render();
             board.hidden = false;
           } catch {
             if (!signal.aborted && cycle.active && active) {
-              status.textContent = "Could not load race ratings. Please try again.";
+              refreshFailed = true;
+              if (snapshot) render();
+              else status.textContent = "Could not load race standings. Please try again.";
               retry.hidden = false;
             }
           } finally {
@@ -3102,8 +3258,12 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
             }
           }
         }
+        const refreshTimer = setInterval(() => {
+          if (active) void load();
+        }, 5 * 6e4);
+        cycle.own(() => clearInterval(refreshTimer));
         cycle.listen(retry, "click", () => {
-          void load();
+          void load(true);
         });
         cycle.listen(refresh, "click", () => {
           void load(true);
@@ -3174,23 +3334,22 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
 .bettergeo-race-panel [class*="global-leaderboard_leaderboard__"] > table { flex: none; }
 .bettergeo-race-results { flex: 1 1 0; min-height: 0; max-height: none; overflow: auto; }
 .bettergeo-race-filters button[aria-pressed="true"] { color: inherit; }
+.bettergeo-race-filters { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
+.bettergeo-race-sort-header { border: 0; padding: 0; background: none; color: inherit; font: inherit; text-transform: inherit; cursor: pointer; white-space: nowrap; }
+.bettergeo-race-sort-header:focus-visible { outline: 1px solid currentColor; outline-offset: 3px; }
+.bettergeo-race-table th[aria-sort] { color: #fff; }
+.bettergeo-race-table th[aria-sort] .bettergeo-race-sort-header::after { margin-left: 3px; font-size: 9px; }
+.bettergeo-race-table th[aria-sort="ascending"] .bettergeo-race-sort-header::after { content: '\u25B2'; }
+.bettergeo-race-table th[aria-sort="descending"] .bettergeo-race-sort-header::after { content: '\u25BC'; }
+.bettergeo-race-board { min-width: 0; overflow-x: auto; }
+.bettergeo-race-table { table-layout: fixed; width: 100%; min-width: 660px; }
+.bettergeo-race-results { min-width: 660px; }
+.bettergeo-race-points { text-align: right; font-variant-numeric: tabular-nums; }
+
 `;
 
   // src/features/online-race.ts
   var selector = '[class*="global-leaderboard-row_player__"] a[href*="/user/"], [class*="leaderboard"] [class*="player-nick_wrapper__"] a[href*="/user/"]';
-  function refreshBadge(badge, player) {
-    const text = `${player.region}${player.position === void 0 ? "" : ` #${player.position}`}`;
-    const title = [
-      player.name.toLowerCase().includes(player.region.toLowerCase()) ? player.name : `${player.name} \xB7 ${player.region}`,
-      player.position === void 0 ? "" : `Regional position: #${player.position}`,
-      player.total === void 0 ? "" : `Total: ${player.total} points`,
-      ...player.points.map((points, index) => `Week ${index + 1}: ${points} points`)
-    ].filter(Boolean).join("\n");
-    if (badge.textContent !== text) badge.textContent = text;
-    if (badge.dataset.region !== player.region) badge.dataset.region = player.region;
-    if (badge.title !== title) badge.title = title;
-    if (badge.getAttribute("aria-label") !== title) badge.setAttribute("aria-label", title);
-  }
   var onlineRace = {
     id: "online-race",
     name: "Online race leaderboard tags",
@@ -3222,19 +3381,16 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
       let retryAt = 0;
       let onDuels = false;
       let generation = 0;
-      installRaceLeaderboard(
-        services,
-        scope,
-        () => players,
-        (result) => {
-          generation++;
-          players = result;
-          loading = false;
-          expires = Date.now() + 5 * 6e4;
-          retryAt = 0;
-          events2.schedule();
-        }
-      );
+      installRaceLeaderboard(services, scope, (result) => {
+        generation++;
+        players = result;
+        loading = false;
+        expires = Date.now() + 5 * 6e4;
+        retryAt = 0;
+        events2.schedule();
+      });
+      const refreshTimer = setInterval(() => events2.schedule(), 5 * 6e4);
+      scope.own(() => clearInterval(refreshTimer));
       scope.own(() => {
         badges.forEach((badge) => badge.remove());
         badges.clear();
@@ -3263,7 +3419,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
               badge.remove();
               badges.delete(link2);
             } else {
-              refreshBadge(badge, player);
+              refreshRaceBadge(badge, player);
               const container = badge.parentElement;
               if (container.lastElementChild !== badge) container.append(badge);
             }
@@ -3273,7 +3429,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
           if (!loading && Date.now() >= expires && Date.now() >= retryAt) {
             loading = true;
             const requestGeneration = generation;
-            void api2.onlineRacePlayers().then((result) => {
+            void api2.onlineRacePlayers(scope.signal).then((result) => {
               if (!scope.active || requestGeneration !== generation) return;
               players = result;
               expires = Date.now() + 5 * 6e4;
@@ -3293,7 +3449,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
             const player = id ? players.get(id) : void 0;
             if (!player) continue;
             const badge = element("span", "bettergeo-online-race");
-            refreshBadge(badge, player);
+            refreshRaceBadge(badge, player);
             badge.tabIndex = 0;
             (link2.closest('[class*="player-nick_wrapper__"]') ?? link2.parentElement)?.append(badge);
             badges.set(link2, badge);

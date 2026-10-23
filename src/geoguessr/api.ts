@@ -1,8 +1,7 @@
 import { historyResponse, finishedDuelResponse } from './responses';
 import { countryCodes } from './countries';
 import { ScoreIndex } from './scores';
-import { onlineRacePlayers } from './online-race';
-import { collectRaceRatings } from './race-ratings';
+import { RaceTrackerClient } from './race-tracker';
 import type {
   Duel,
   GameHistory,
@@ -37,34 +36,10 @@ export class RequestCache {
 export class GeoGuessrApi {
   readonly scores = new ScoreIndex();
   private cache = new RequestCache();
+  private raceTracker = new RaceTrackerClient();
   constructor(private page: PageWindow) {}
-  async onlineRacePlayers(signal?: AbortSignal) {
-    const response = await this.page.fetch('/world-championship', {
-      credentials: 'same-origin',
-      cache: 'no-store',
-      signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(20_000)])
-        : AbortSignal.timeout(20_000),
-    });
-    if (!response.ok) throw new Error(`Online race: HTTP ${response.status}`);
-    return onlineRacePlayers(await response.text());
-  }
-  onlineRaceRatings(
-    players: ReadonlySet<string>,
-    signal: AbortSignal,
-    progress?: (found: number, scanned: number) => void,
-  ) {
-    return collectRaceRatings(
-      players,
-      (offset, limit) =>
-        this.json(
-          `/api/v4/ranked-system/ratings?offset=${offset}&limit=${limit}`,
-          'Global leaderboard',
-          { signal: AbortSignal.any([signal, AbortSignal.timeout(20_000)]), cache: 'no-store' },
-        ),
-      signal,
-      progress,
-    );
+  onlineRacePlayers(signal?: AbortSignal, force = false) {
+    return this.raceTracker.get(signal, force);
   }
   private async json(path: string, label: string, options: RequestInit = {}): Promise<unknown> {
     const response = await this.page.fetch(path, {

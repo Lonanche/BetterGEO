@@ -1,6 +1,7 @@
 import { element, link } from '../core/dom';
 import { countryName } from '../geoguessr/countries';
 import type { RaceParticipant } from '../geoguessr/online-race';
+import { refreshRaceBadge } from './race-badge';
 
 /** Reuse loaded player decorations, otherwise build the same native avatar/nickname layout. */
 export function racePlayer(
@@ -71,22 +72,8 @@ export function racePlayer(
       ),
     );
   }
-  const badge = element(
-    'span',
-    'bettergeo-online-race',
-    `${player.region}${player.position === undefined ? '' : ` #${player.position}`}`,
-  );
-  badge.dataset.region = player.region;
-  badge.title = [
-    player.name.toLowerCase().includes(player.region.toLowerCase())
-      ? player.name
-      : `${player.name} · ${player.region}`,
-    player.position === undefined ? '' : `Regional position: #${player.position}`,
-    player.total === undefined ? '' : `Total: ${player.total} points`,
-    ...player.points.map((points, index) => `Week ${index + 1}: ${points} points`),
-  ]
-    .filter(Boolean)
-    .join('\n');
+  const badge = element('span', 'bettergeo-online-race');
+  refreshRaceBadge(badge, player);
   badge.tabIndex = 0;
   identity.append(badge);
   return identity;

@@ -13,6 +13,7 @@ import { gameResults } from '../src/features/game-results';
 import { matchHistory } from '../src/features/match-history';
 import { summaryRecovery } from '../src/features/summary-recovery';
 import { onlineRace } from '../src/features/online-race';
+import { raceTrackerApi } from '../src/geoguessr/race-tracker';
 import { racePlayer } from '../src/features/race-player';
 import type { Duel, GameHistory, PageWindow } from '../src/geoguessr/types';
 import type { Services } from '../src/core/feature';
@@ -25,7 +26,7 @@ function fixture(path: string, html = '') {
   const dom = new JSDOM(html, { url: `https://www.geoguessr.com${path}`, pretendToBeVisual: true });
   const page = dom.window as unknown as PageWindow;
   const originals = new Map<string, PropertyDescriptor | undefined>();
-  for (const name of ['GM_getValue', 'GM_setValue'])
+  for (const name of ['GM_getValue', 'GM_setValue', 'GM_xmlhttpRequest'])
     originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
   for (const name of [
     'window',
@@ -75,150 +76,299 @@ const raceShell = `<div class="leaderboard-shell_shell__test">
   <div class="leaderboard-shell_content__test"><div class="global-leaderboard_leaderboard__test">Original leaderboard</div></div>
 </div>`;
 
-test('race tab loads on demand, numbers alphabetical rating ties, filters, caches, and restores native tabs', async () => {
+function trackerData(players: Record<string, unknown>[]) {
+  return {
+    schemaVersion: 1,
+    weekIndex: 0,
+    updatedAt: Date.now(),
+    nextRefreshAt: Date.now() + 300000,
+    stale: false,
+    completed: false,
+    waitingForWeek: null,
+    players: players.map((p, index) => ({
+      id,
+      region: 'EMEA',
+      nick: 'Alice',
+      officialPosition: 1,
+      position: index + 1,
+      officialPoints: 0,
+      projectedPoints: 25,
+      weekPoints: 25,
+      gamesPlayed: 10,
+      eligible: true,
+      rating: 1800,
+      points: [0, 0, 0, 0],
+      ...p,
+    })),
+  };
+}
+test('both leaderboard views show projected badge positions and preserve them after refresh and tab switching', async () => {
+  const nativeRow = `<div class="global-leaderboard-row_player__test player-nick_wrapper__test"><a href="/user/${id}">Alice</a><span>CLUB</span></div>`;
+  const services = fixture(
+    '/multiplayer/duels',
+    raceShell.replace('Original leaderboard', nativeRow),
+  );
+  let position = 3;
+  services.api.onlineRacePlayers = async () =>
+    new Map([
+      [
+        id,
+        {
+          nick: 'Alice',
+          rating: 1800,
+          region: 'EMEA',
+          name: 'Race EMEA',
+          position: 7,
+          total: 0,
+          points: [0],
+          projection: {
+            position,
+            total: 18,
+            weekPoints: 18,
+            weekIndex: 0,
+            gamesWeek: '12',
+            updatedAt: Date.now(),
+          },
+        },
+      ],
+    ]);
+  const scope = new Scope();
+  try {
+    onlineRace.enable(services, scope);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const nativeBadge = () =>
+      document.querySelector<HTMLElement>(
+        '.global-leaderboard_leaderboard__test .bettergeo-online-race',
+      )!;
+    assert.equal(nativeBadge().textContent, 'EMEA #3');
+    assert.equal(nativeBadge().dataset.source, 'projection');
+    assert.match(nativeBadge().title, /Projected regional position: #3/);
+    assert.match(nativeBadge().title, /requires at least 10 ranked games/);
+    assert.match(nativeBadge().title, /Official regional position: #7/);
+    assert.match(nativeBadge().title, /Week 1: 18 points \(projected\) · Games played: 12/);
+    const nativeTab = document.querySelector<HTMLButtonElement>('[role="tab"]')!;
+    const tab = document.querySelector<HTMLButtonElement>('[data-bettergeo-race-tab]')!;
+    tab.click();
+    await tick();
+    assert.equal(
+      document.querySelector('.bettergeo-race-panel .bettergeo-online-race')!.textContent,
+      'EMEA #3',
+    );
+    position = 2;
+    document.querySelector<HTMLButtonElement>('.bettergeo-race-refresh')!.click();
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(nativeBadge().textContent, 'EMEA #2');
+    nativeTab.click();
+    tab.click();
+    await tick();
+    assert.equal(
+      document.querySelector('.bettergeo-race-panel .bettergeo-online-race')!.textContent,
+      'EMEA #2',
+    );
+    assert.equal(
+      document.querySelectorAll('.bettergeo-race-panel .bettergeo-online-race').length,
+      1,
+    );
+  } finally {
+    scope.dispose();
+  }
+});
+
+test('race tab shares the tracker dataset, shows projected ranks, filters and restores native tabs', async () => {
   const services = fixture('/multiplayer/duels', raceShell);
   const second = 'b'.repeat(24),
     missing = 'c'.repeat(24);
-  const calls: string[] = [];
-  services.page.fetch = async (input) => {
-    const path = String(input);
-    calls.push(path);
-    if (path === '/world-championship')
-      return new Response(
-        `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
-          props: {
-            pageProps: {
-              race: {
-                Emea: {
-                  name: 'World League race - EMEA',
-                  players: [
-                    {
-                      id,
-                      nick: 'Alice',
-                      position: calls.filter((path) => path === '/world-championship').length,
-                      total:
-                        calls.filter((path) => path === '/world-championship').length === 1
-                          ? 0
-                          : 25,
-                    },
-                    { id: missing, nick: 'Missing', position: 2 },
-                  ],
-                },
-                Apac: {
-                  name: 'World League race - APAC',
-                  players: [{ id: second, nick: 'Bob', position: 1 }],
-                },
+  let requests = 0;
+  Reflect.set(
+    globalThis,
+    'GM_xmlhttpRequest',
+    (details: Parameters<typeof GM_xmlhttpRequest>[0]) => {
+      requests++;
+      assert.equal(details.url, raceTrackerApi);
+      assert.equal(details.anonymous, true);
+      queueMicrotask(() =>
+        details.onload({
+          status: 200,
+          responseText: JSON.stringify(
+            trackerData([
+              {
+                id,
+                nick: 'Alice',
+                officialPosition: 7,
+                position: requests === 1 ? 2 : 1,
+                officialPoints: requests === 1 ? 0 : 25,
               },
-            },
-          },
-        })}</script>`,
+              { id: second, nick: 'Bob', region: 'APAC', position: 1 },
+              { id: 'd'.repeat(24), nick: 'Carl', region: 'Americas', position: 1, rating: 1900 },
+              { id: missing, nick: 'Missing', rating: null, position: 3 },
+            ]),
+          ),
+        }),
       );
-    if (path === '/api/v4/ranked-system/ratings?offset=0&limit=100')
-      return Response.json(
-        Array.from({ length: 100 }, (_, i) => ({
-          userId: i ? `other-${i}` : id,
-          rating: 1800 - i,
-        })),
-      );
-    if (path === '/api/v4/ranked-system/ratings?offset=100&limit=100')
-      return Response.json([{ userId: second, rating: 1800 }]);
-    throw new Error(`Unexpected request: ${path}`);
+      return { abort() {} };
+    },
+  );
+  services.page.fetch = async () => {
+    throw Error('The race tab must not fetch GeoGuessr leaderboards.');
   };
   const scope = new Scope();
   try {
     onlineRace.enable(services, scope);
     await new Promise((resolve) => setTimeout(resolve, 200));
-    assert.deepEqual(calls, ['/world-championship']);
+    assert.equal(requests, 1);
     const tab = document.querySelector<HTMLButtonElement>('[data-bettergeo-race-tab]')!;
     const native = document.querySelector<HTMLButtonElement>('[role="tab"]')!;
-    let nativeClicks = 0;
-    native.addEventListener('click', () => {
-      nativeClicks++;
-    });
     tab.click();
     await tick();
     await tick();
     const rows = () => [...document.querySelectorAll('.bettergeo-race-table tbody tr')];
-    assert.equal(rows().length, 3);
-    assert.equal(rows()[0]!.children.length, 3);
+    assert.equal(rows().length, 4);
+    assert.deepEqual(
+      rows().map((row) => row.querySelector('a')!.textContent),
+      ['Carl', 'Alice', 'Bob', 'Missing'],
+    );
+    assert.equal(rows()[0]!.children.length, 6);
     assert.ok(rows()[0]!.className.includes('global-leaderboard-row_row__'));
-    assert.ok(rows()[0]!.querySelector('[class*="global-leaderboard-row_rank__"]'));
     assert.ok(
       rows()[0]!.querySelector(
         '[class*="player-nick_wrapper__"] > .bettergeo-online-race:last-child',
       ),
     );
-    assert.match(rows()[0]!.textContent!, /Alice/);
-    assert.match(rows()[1]!.textContent!, /Bob/);
-    assert.equal(rows()[0]!.firstElementChild?.textContent, '1');
-    assert.equal(rows()[1]!.firstElementChild?.textContent, '2');
-    assert.match(rows()[2]!.textContent!, /N\/A/);
-    assert.equal(document.querySelector('.bettergeo-race-info'), null);
-    assert.match(
-      document.querySelector<HTMLElement>('.bettergeo-race-updated')!.title,
-      /cached for 5 minutes.*refresh button/,
+    const sortButton = (key: string) =>
+      document.querySelector<HTMLButtonElement>(`[data-bettergeo-race-sort="${key}"]`)!;
+    sortButton('projected').click();
+    assert.deepEqual(
+      rows().map((row) => row.querySelector('a')!.textContent),
+      ['Bob', 'Carl', 'Alice', 'Missing'],
     );
-    assert.equal(document.querySelector<HTMLElement>('.bettergeo-race-status')!.hidden, true);
-    assert.equal(document.querySelector('.bettergeo-race-panel')?.getAttribute('aria-busy'), null);
-    assert.equal(native.getAttribute('aria-selected'), 'false');
-    assert.equal(
-      document.querySelector('.global-leaderboard_leaderboard__test')?.textContent,
-      'Original leaderboard',
+    assert.equal(sortButton('projected').parentElement!.getAttribute('aria-sort'), 'ascending');
+    assert.equal(rows()[0]!.children[4]!.textContent, '25');
+    assert.equal(rows()[0]!.children[5]!.textContent, '25');
+    sortButton('elo').click();
+    assert.equal(rows()[0]!.querySelector('a')!.textContent, 'Carl');
+    assert.deepEqual(
+      rows().map((row) => row.children[0]!.textContent),
+      ['1', '2', '3', '4'],
     );
+    assert.deepEqual(
+      rows().map((row) => row.children[1]!.textContent),
+      ['1', '2', '1', '3'],
+    );
+    sortButton('elo').click();
+    assert.deepEqual(
+      rows().map((row) => row.querySelector('a')!.textContent),
+      ['Alice', 'Bob', 'Carl', 'Missing'],
+    );
+    assert.equal(sortButton('elo').parentElement!.getAttribute('aria-sort'), 'ascending');
+    sortButton('name').click();
+    assert.equal(rows()[0]!.querySelector('a')!.textContent, 'Alice');
+    sortButton('total').click();
+    assert.equal(sortButton('total').parentElement!.getAttribute('aria-sort'), 'descending');
+    sortButton('week').click();
+    assert.equal(sortButton('week').parentElement!.getAttribute('aria-sort'), 'descending');
+    assert.equal(requests, 1);
+    sortButton('elo').click();
     const filters = [
       ...document.querySelectorAll<HTMLButtonElement>('.bettergeo-race-filters button'),
     ];
     filters.find((button) => button.textContent === 'EMEA')!.click();
     assert.equal(rows().length, 2);
+    assert.deepEqual(
+      rows().map((row) => row.children[0]!.textContent),
+      ['1', '2'],
+    );
     assert.match(rows()[0]!.textContent!, /Alice/);
-    assert.equal(rows()[0]!.firstElementChild?.textContent, '1');
+    assert.equal(rows()[0]!.children[1]?.textContent, '2');
+    assert.match(rows()[1]!.textContent!, /N\/A/);
+    assert.equal(rows()[1]!.children[1]?.textContent, '3');
+    assert.match(
+      document.querySelector<HTMLElement>('.bettergeo-race-updated')!.title,
+      /Snapshot from.*shared server cache/,
+    );
+    assert.equal(document.querySelector<HTMLElement>('.bettergeo-race-status')!.hidden, true);
+    assert.equal(native.getAttribute('aria-selected'), 'false');
     native.click();
-    assert.equal(nativeClicks, 1);
     assert.equal(native.getAttribute('aria-selected'), 'true');
-    assert.equal(document.querySelector<HTMLElement>('.bettergeo-race-panel')!.hidden, true);
     tab.click();
     await tick();
-    assert.equal(calls.length, 3);
-    assert.equal(rows().length, 2);
-    assert.match(document.querySelector('.bettergeo-race-updated')!.textContent!, /^Updated /);
-    const refresh = document.querySelector<HTMLButtonElement>('.bettergeo-race-refresh')!;
-    refresh.click();
-    assert.equal(refresh.disabled, true);
+    assert.equal(requests, 1);
+    document.querySelector<HTMLButtonElement>('.bettergeo-race-refresh')!.click();
     await tick();
     await tick();
-    assert.equal(calls.length, 6);
-    assert.equal(calls.filter((path) => path === '/world-championship').length, 2);
-    assert.equal(refresh.disabled, false);
-    assert.equal(rows().length, 2);
-    assert.equal(rows()[0]!.querySelector('.bettergeo-online-race')!.textContent, 'EMEA #2');
-    native.click();
-    tab.click();
-    await tick();
-    assert.equal(calls.length, 6);
-    assert.equal(rows()[0]!.querySelector('.bettergeo-online-race')!.textContent, 'EMEA #2');
+    assert.equal(requests, 2);
+    assert.equal(rows()[0]!.querySelector('.bettergeo-online-race')!.textContent, 'EMEA #1');
     assert.match(
       rows()[0]!.querySelector<HTMLElement>('.bettergeo-online-race')!.title,
       /Total: 25 points/,
     );
-    services.events.schedule();
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    assert.equal(document.querySelectorAll('[data-bettergeo-race-tab]').length, 1);
-    assert.equal(
-      document.querySelectorAll('.bettergeo-race-panel .bettergeo-online-race').length,
-      2,
-    );
+    native.click();
+    tab.click();
+    await tick();
+    assert.equal(requests, 2);
     services.page.history.pushState({}, '', '/maps');
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(document.querySelector('[data-bettergeo-race-tab]'), null);
-    assert.equal(document.querySelector('.bettergeo-race-panel'), null);
     assert.equal(native.getAttribute('aria-selected'), 'true');
-    assert.equal(document.querySelector('.bettergeo-race-open'), null);
-    assert.ok(
-      calls.every(
-        (path) =>
-          path === '/world-championship' || path.startsWith('/api/v4/ranked-system/ratings?'),
-      ),
-    );
+  } finally {
+    scope.dispose();
+  }
+});
+
+test('failed refresh keeps the last good rows and timestamp, including after filtering, and Retry fetches again', async () => {
+  const services = fixture('/multiplayer/duels', raceShell);
+  let requests = 0;
+  const originalTime = Date.now() - 30_000;
+  Reflect.set(
+    globalThis,
+    'GM_xmlhttpRequest',
+    (details: Parameters<typeof GM_xmlhttpRequest>[0]) => {
+      requests++;
+      const data = trackerData([{ id, position: requests === 1 ? 2 : 1 }]);
+      data.updatedAt = requests === 1 ? originalTime : Date.now();
+      queueMicrotask(() =>
+        details.onload({ status: requests === 2 ? 503 : 200, responseText: JSON.stringify(data) }),
+      );
+      return { abort() {} };
+    },
+  );
+  const scope = new Scope();
+  try {
+    onlineRace.enable(services, scope);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    document.querySelector<HTMLButtonElement>('[data-bettergeo-race-tab]')!.click();
+    await tick();
+    const panel = document.querySelector<HTMLElement>('.bettergeo-race-panel')!;
+    const board = panel.querySelector<HTMLElement>('[class*="global-leaderboard_leaderboard__"]')!;
+    const updated = panel.querySelector<HTMLElement>('.bettergeo-race-updated')!;
+    const originalTimestamp = updated.textContent;
+    const status = panel.querySelector<HTMLElement>('.bettergeo-race-status')!;
+    const rows = () => [...panel.querySelectorAll('tbody tr')];
+    assert.equal(rows()[0]!.children[1]!.textContent, '2');
+    panel.querySelector<HTMLButtonElement>('.bettergeo-race-refresh')!.click();
+    assert.equal(board.hidden, false);
+    await tick();
+    await tick();
+    assert.equal(requests, 2);
+    assert.equal(board.hidden, false);
+    assert.equal(updated.textContent, originalTimestamp);
+    assert.equal(rows()[0]!.children[1]!.textContent, '2');
+    assert.match(status.textContent!, /Could not refresh.*last successful snapshot/);
+    [...document.querySelectorAll<HTMLButtonElement>('.bettergeo-race-filters button')]
+      .find((button) => button.textContent === 'EMEA')!
+      .click();
+    assert.match(status.textContent!, /Could not refresh/);
+    assert.equal(rows().length, 1);
+    const retry = panel.querySelector<HTMLButtonElement>('.bettergeo-race-retry')!;
+    assert.equal(retry.hidden, false);
+    retry.click();
+    await tick();
+    await tick();
+    assert.equal(requests, 3);
+    assert.equal(board.hidden, false);
+    assert.equal(rows()[0]!.children[1]!.textContent, '1');
+    assert.equal(status.hidden, true);
+    assert.equal(retry.hidden, true);
   } finally {
     scope.dispose();
   }
@@ -273,22 +423,26 @@ test('race player rows reuse native decorations and build native avatars without
   services.close();
 });
 
-test('race tab can retry failed leaderboard loads and aborts in-flight requests on disable', async () => {
+test('race tab retries tracker failures and aborts pending transport on disable', async () => {
   const services = fixture('/multiplayer/duels', raceShell);
-  let fail = true;
-  let requestSignal: AbortSignal | null | undefined;
-  services.page.fetch = async (input, init) => {
-    if (String(input) === '/world-championship')
-      return new Response(
-        `<script id="__NEXT_DATA__">${JSON.stringify({ props: { pageProps: { race: { Emea: { players: [{ id, nick: 'Alice' }] } } } } })}</script>`,
-      );
-    if (fail) return new Response('', { status: 429 });
-    requestSignal = init?.signal;
-    return new Promise<Response>((_, reject) =>
-      requestSignal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }),
-    );
-  };
+  let fail = true,
+    aborted = 0;
+  Reflect.set(
+    globalThis,
+    'GM_xmlhttpRequest',
+    (details: Parameters<typeof GM_xmlhttpRequest>[0]) => {
+      if (fail) queueMicrotask(() => details.onload({ status: 503, responseText: '{}' }));
+      return {
+        abort() {
+          aborted++;
+          details.onabort();
+        },
+      };
+    },
+  );
   const scope = new Scope();
+  const previous = console.error;
+  console.error = () => {};
   try {
     onlineRace.enable(services, scope);
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -296,18 +450,15 @@ test('race tab can retry failed leaderboard loads and aborts in-flight requests 
     await tick();
     const retry = document.querySelector<HTMLButtonElement>('.bettergeo-race-retry')!;
     assert.equal(retry.hidden, false);
-    assert.equal(document.querySelector<HTMLElement>('.bettergeo-race-status')!.hidden, false);
-    assert.equal(document.querySelector('.bettergeo-race-info'), null);
     fail = false;
     retry.click();
     await tick();
-    assert.equal(requestSignal?.aborted, false);
   } finally {
     scope.dispose();
+    console.error = previous;
   }
-  assert.equal(requestSignal?.aborted, true);
+  assert.equal(aborted, 1);
   assert.equal(document.querySelector('.bettergeo-race-panel'), null);
-  assert.equal(document.querySelector('[role="tab"]')?.getAttribute('aria-selected'), 'true');
 });
 
 test('online race tags use IDs, handle rerenders and clean up when disabled', async () => {
@@ -318,12 +469,30 @@ test('online race tags use IDs, handle rerenders and clean up when disabled', as
     row(id, 'Renamed player') + row('b'.repeat(24), 'Same nickname'),
   );
   let requests = 0;
-  services.page.fetch = async () => {
-    requests++;
-    return new Response(
-      `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { race: { Emea: { name: 'World League 2027 race - EMEA', players: [{ id, nick: 'Same nickname', position: requests, total: 12, points: [12, 0, 0, 0] }] } } } } })}</script>`,
-    );
-  };
+  Reflect.set(
+    globalThis,
+    'GM_xmlhttpRequest',
+    (details: Parameters<typeof GM_xmlhttpRequest>[0]) => {
+      requests++;
+      queueMicrotask(() =>
+        details.onload({
+          status: 200,
+          responseText: JSON.stringify(
+            trackerData([
+              {
+                id,
+                nick: 'Same nickname',
+                position: requests,
+                officialPoints: 12,
+                points: [12, 0, 0, 0],
+              },
+            ]),
+          ),
+        }),
+      );
+      return { abort() {} };
+    },
+  );
   const scope = new Scope();
   try {
     onlineRace.enable(services, scope);
@@ -350,20 +519,20 @@ test('online race tags use IDs, handle rerenders and clean up when disabled', as
     );
     assert.match(
       document.querySelector<HTMLElement>('.bettergeo-online-race')!.title,
-      /Week 1: 12 points/,
+      /Week 1: 25 points \(projected\) · Games played: 10/,
     );
     services.page.history.pushState({}, '', '/maps');
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(document.querySelectorAll('.bettergeo-online-race').length, 0);
-    // Fetch on entry even before leaderboard rows have rendered, bypassing the old cache.
+    // Re-entering the route reuses the shared tracker cache.
     document.body.innerHTML = '';
     services.page.history.pushState({}, '', '/multiplayer/duels');
     await new Promise((resolve) => setTimeout(resolve, 250));
-    assert.equal(requests, 2);
+    assert.equal(requests, 1);
     document.body.innerHTML = row(id, 'Renamed again');
     await new Promise((resolve) => setTimeout(resolve, 150));
-    assert.equal(document.querySelector('.bettergeo-online-race')?.textContent, 'EMEA #2');
-    assert.equal(requests, 2);
+    assert.equal(document.querySelector('.bettergeo-online-race')?.textContent, 'EMEA #1');
+    assert.equal(requests, 1);
   } finally {
     scope.dispose();
   }

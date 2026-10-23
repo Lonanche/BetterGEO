@@ -29,6 +29,7 @@ const options = {
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @connect      game-server.geoguessr.com
+// @connect      elorace.lonanche.workers.dev
 // @noframes
 // ==/UserScript==`,
   },

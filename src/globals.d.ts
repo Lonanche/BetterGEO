@@ -8,6 +8,7 @@ declare global {
     method: string;
     url: string;
     timeout: number;
+    anonymous?: boolean;
     onload(response: { status: number; responseText: string }): void;
     onerror(): void;
     ontimeout(): void;
