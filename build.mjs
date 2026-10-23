@@ -13,7 +13,7 @@ const options = {
 // @name         BetterGEO
 // @namespace    BetterGEO
 // @version      ${version}
-// @description  Toggleable GeoGuessr improvements: old duel summaries, map result links, hidden recent duels, profile restrictions, country ranked stats, random maps, and tournaments.
+// @description  Toggleable GeoGuessr improvements: ELO Race leaderboard and badges, old duel summaries, map result links, hidden recent duels, profile restrictions, country ranked stats, random maps, and tournaments.
 // @author       trausi
 // @homepageURL  https://github.com/lonanche/BetterGEO
 // @supportURL   https://github.com/lonanche/BetterGEO/issues
