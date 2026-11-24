@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="236" height="44" viewBox="0 0 236 44" role="img" aria-label="Install BetterGEO">
+  <title>Install BetterGEO</title>
+  <defs>
+    <linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a996ff"/>
+      <stop offset="1" stop-color="#8a72f0"/>
+    </linearGradient>
+  </defs>
+  <rect width="236" height="44" rx="10" fill="url(#fill)"/>
+  <rect x="0.5" y="0.5" width="235" height="43" rx="9.5" fill="none" stroke="#ffffff" stroke-opacity="0.25"/>
+  <g fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" transform="translate(18 11)">
+    <path d="M11 2v13M5.5 9.5 11 15l5.5-5.5M3 20h16"/>
+  </g>
+  <text x="48" y="28.5" fill="#ffffff" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" letter-spacing="0.6" textLength="168" lengthAdjust="spacingAndGlyphs">INSTALL BETTERGEO</text>
+</svg>

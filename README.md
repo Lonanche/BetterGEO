@@ -1,4 +1,4 @@
-[![Install BetterGEO](https://img.shields.io/badge/Install-BetterGEO-9b87f5?style=for-the-badge)](https://raw.githubusercontent.com/lonanche/BetterGEO/main/dist/BetterGEO.user.js)
+[![Install BetterGEO](assets/install-button.svg)](https://raw.githubusercontent.com/lonanche/BetterGEO/main/dist/BetterGEO.user.js)
 
 # BetterGEO
 
