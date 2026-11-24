@@ -82,3 +82,20 @@ export class PageEvents {
       this.page.history.replaceState = this.originalReplace;
   }
 }
+
+/**
+ * GeoGuessr's React app hydrates the whole server-rendered document. Changing that markup
+ * before React has hydrated it causes a hydration error and a full client re-render, so
+ * wait until React has claimed the node (it tags hydrated nodes with `__reactFiber$…`).
+ * Falls back to true after a while in case React's internals change.
+ */
+export function hydrated(
+  node: Element | null | undefined,
+  page: Pick<Window, 'performance'> = window,
+) {
+  if (!node) return false;
+  return (
+    Object.keys(node).some((key) => key.startsWith('__reactFiber$')) ||
+    page.performance.now() > 20_000
+  );
+}

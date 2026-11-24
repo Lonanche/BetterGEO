@@ -1,6 +1,8 @@
-import type { PageEvents } from './page';
+import { hydrated, type PageEvents } from './page';
 import type { Scope } from './scope';
 import { viewedProfileId } from '../geoguessr/routes';
+import { nativeSelector } from './native-styles';
+import { profile } from '../geoguessr/styles';
 /** One read per profile visit, with common stale-response and remount handling. */
 export function watchProfile<T>(
   events: PageEvents,
@@ -36,6 +38,11 @@ export function watchProfile<T>(
       if (!id || !document.head || loading) return;
       const target = options.target();
       if (!target) return;
+      if (!hydrated(target)) {
+        // Hydration does not mutate the DOM, so nothing else would wake us up.
+        setTimeout(() => scope.active && events.schedule(), 150);
+        return;
+      }
       const current = visit;
       const valid = () => scope.active && current === visit && viewedProfileId() === id;
       if (!attempted) {
@@ -58,7 +65,7 @@ export function watchProfile<T>(
 }
 export function profileWidgets() {
   return (
-    document.querySelector('[class*="profile-v2_staticWidgets__"]') ||
-    document.querySelector('[class*="profile-v2_widgetRow__"]')?.parentElement
+    document.querySelector(nativeSelector(profile, 'staticWidgets')) ||
+    document.querySelector(nativeSelector(profile, 'widgetRow'))?.parentElement
   );
 }

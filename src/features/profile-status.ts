@@ -1,6 +1,7 @@
 import type { Feature } from '../core/feature';
 import { element } from '../core/dom';
-import { nativeStyles } from '../core/native-styles';
+import { nativeSelector, nativeStyles } from '../core/native-styles';
+import { profile } from '../geoguessr/styles';
 import { watchProfile } from '../core/profile';
 import { moderationState } from '../geoguessr/moderation';
 import type { UserModerationStatus } from '../geoguessr/types';
@@ -23,7 +24,7 @@ export const profileStatus: Feature = {
     scope.own(() => style.remove());
     watchProfile(events, scope, {
       name: 'profile status',
-      target: () => document.querySelector('[class*="profile-v2_headerMainContent__"]'),
+      target: () => document.querySelector(nativeSelector(profile, 'headerMainContent')),
       load: (id) => api.userStatus(id),
       reset() {
         clearTimeout(timer);
@@ -41,12 +42,11 @@ export const profileStatus: Feature = {
           removeBadge();
           badge = statusBadge(data);
           if (!badge) return;
+          const wrapperSelector = nativeSelector(profile, 'proBadgeWrapper');
           const pro = header.querySelector(
-            '[data-qa="pro-tier"], [class*="profile-v2_proBadge__"]',
+            `[data-qa="pro-tier"], ${nativeSelector(profile, 'proBadge')}`,
           );
-          const wrapper =
-            pro?.closest('[class*="profile-v2_proBadgeWrapper__"]') ??
-            header.querySelector('[class*="profile-v2_proBadgeWrapper__"]');
+          const wrapper = pro?.closest(wrapperSelector) ?? header.querySelector(wrapperSelector);
           if (wrapper) {
             row = wrapper;
             row.classList.add('bettergeo-badges-row');
@@ -98,7 +98,7 @@ export function statusBadge(user: UserModerationStatus): HTMLElement | undefined
   if (!state.banned && state.suspension !== 'active') return undefined;
   const badge = element(
     'p',
-    `${nativeStyles().resolve('profile-v2_proBadge__Wlpxj')} bettergeo-restriction-badge`,
+    `${nativeStyles().module(profile).cls('proBadge')} bettergeo-restriction-badge`.trim(),
   );
   badge.append(
     element('span', 'bettergeo-restriction-label', state.banned ? 'Banned' : 'Suspended'),

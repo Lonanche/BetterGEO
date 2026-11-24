@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BetterGEO
 // @namespace    BetterGEO
-// @version      0.2.1
-// @description  Toggleable GeoGuessr improvements: ELO Race leaderboard and badges, old duel summaries, map result links, hidden recent duels, profile restrictions, country ranked stats, random maps, and tournaments.
+// @version      0.3.0
+// @description  Toggleable GeoGuessr improvements: old duel summaries, map result links, hidden recent duels, profile restrictions, country ranked stats, random maps, and tournaments.
 // @author       trausi
 // @homepageURL  https://github.com/lonanche/BetterGEO
 // @supportURL   https://github.com/lonanche/BetterGEO/issues
@@ -18,7 +18,6 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @connect      game-server.geoguessr.com
-// @connect      elorace.lonanche.workers.dev
 // @noframes
 // ==/UserScript==
 "use strict";
@@ -215,6 +214,10 @@
         this.page.history.replaceState = this.originalReplace;
     }
   };
+  function hydrated(node2, page2 = window) {
+    if (!node2) return false;
+    return Object.keys(node2).some((key) => key.startsWith("__reactFiber$")) || page2.performance.now() > 2e4;
+  }
 
   // src/core/scope.ts
   var Scope = class {
@@ -320,15 +323,15 @@
 
   // src/core/dom.ts
   function element(tag, className = "", text) {
-    const node = document.createElement(tag);
-    node.className = className;
-    if (text !== void 0) node.textContent = text;
-    return node;
+    const node2 = document.createElement(tag);
+    node2.className = className;
+    if (text !== void 0) node2.textContent = text;
+    return node2;
   }
   function link(text, href, className = "") {
-    const node = element("a", className, text);
-    node.href = href;
-    return node;
+    const node2 = element("a", className, text);
+    node2.href = href;
+    return node2;
   }
 
   // src/core/menu.ts
@@ -586,160 +589,6 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     }
   };
 
-  // src/geoguessr/race-tracker.ts
-  var raceTrackerUrl = "https://elorace.lonanche.workers.dev";
-  var raceTrackerApi = `${raceTrackerUrl}/api/v1/standings`;
-  var FIVE_MINUTES = 3e5;
-  function object(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value))
-      throw new Error("Unexpected race tracker data.");
-    return value;
-  }
-  function integer(value, minimum = 0) {
-    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum)
-      throw new Error("Invalid race tracker number.");
-    return value;
-  }
-  function optionalInteger(value) {
-    return value === null ? void 0 : integer(value);
-  }
-  function raceTrackerPlayers(data, now = Date.now()) {
-    const root = object(data);
-    const updatedAt = integer(root.updatedAt, 1);
-    if (root.schemaVersion !== 1 || updatedAt > now + FIVE_MINUTES || typeof root.stale !== "boolean" || typeof root.completed !== "boolean" || !Array.isArray(root.players) || !root.players.length || root.players.length > 1e3)
-      throw new Error("Unexpected race tracker snapshot.");
-    const weekIndex = integer(root.weekIndex);
-    if (weekIndex > 3) throw new Error("Invalid race week.");
-    const waitingForWeek = root.waitingForWeek === null ? null : integer(root.waitingForWeek, 1);
-    const stale = root.stale || !root.completed && now - updatedAt > 2 * FIVE_MINUTES;
-    const players = /* @__PURE__ */ new Map();
-    for (const value of root.players) {
-      const p = object(value);
-      if (typeof p.id !== "string" || !/^[a-f0-9]{24}$/i.test(p.id) || players.has(p.id) || typeof p.nick !== "string" || p.nick.length > 200 || !["EMEA", "APAC", "Americas"].includes(String(p.region)) || !Array.isArray(p.points) || p.points.length !== 4 || typeof p.eligible !== "boolean")
-        throw new Error("Invalid race tracker player.");
-      const games = integer(p.gamesPlayed), weekPoints = integer(p.weekPoints);
-      if (games < 10 && weekPoints !== 0 || p.eligible !== games >= 10)
-        throw new Error("Invalid race eligibility.");
-      const projection = {
-        position: integer(p.position, 1),
-        total: integer(p.projectedPoints),
-        weekPoints,
-        weekIndex,
-        gamesWeek: String(games),
-        updatedAt,
-        stale,
-        waitingForWeek,
-        completed: root.completed
-      };
-      const official = p.officialPosition === null ? void 0 : integer(p.officialPosition, 1);
-      players.set(p.id, {
-        region: String(p.region),
-        name: `World League 2027 race - ${p.region}`,
-        nick: p.nick,
-        avatar: typeof p.avatar === "string" && /^pin\/[\w.-]+$/.test(p.avatar) ? p.avatar : void 0,
-        countryCode: typeof p.countryCode === "string" && /^[a-z]{2}$/i.test(p.countryCode) ? p.countryCode.toLowerCase() : void 0,
-        position: official,
-        total: integer(p.officialPoints),
-        points: p.points.map((n) => integer(n)),
-        rating: optionalInteger(p.rating),
-        projection
-      });
-    }
-    const nextRefreshAt = integer(root.nextRefreshAt, 1);
-    return {
-      players,
-      expires: stale ? now + 6e4 : Math.min(now + FIVE_MINUTES, Math.max(now + 1e4, nextRefreshAt))
-    };
-  }
-  function requestSnapshot(signal) {
-    return new Promise((resolve, reject) => {
-      signal.throwIfAborted();
-      let request;
-      let settled = false;
-      const finish = (error, value) => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", abort);
-        if (error) reject(error);
-        else resolve(value);
-      };
-      const abort = () => {
-        finish(new Error("Race tracker request aborted."));
-        request?.abort();
-      };
-      signal.addEventListener("abort", abort, { once: true });
-      try {
-        request = GM_xmlhttpRequest({
-          method: "GET",
-          url: raceTrackerApi,
-          timeout: 2e4,
-          anonymous: true,
-          onload(response) {
-            try {
-              if (response.status !== 200) throw new Error(`Race tracker: HTTP ${response.status}`);
-              if (response.responseText.length > 2e6)
-                throw new Error("Race tracker response is too large.");
-              finish(void 0, JSON.parse(response.responseText));
-            } catch (error) {
-              finish(error instanceof Error ? error : new Error("Invalid race tracker response."));
-            }
-          },
-          onerror: () => finish(new Error("Race tracker request failed.")),
-          ontimeout: () => finish(new Error("Race tracker request timed out.")),
-          onabort: () => finish(new Error("Race tracker request aborted."))
-        });
-      } catch {
-        finish(new Error("Race tracker request failed."));
-      }
-    });
-  }
-  var RaceTrackerClient = class {
-    cache;
-    pending;
-    get(signal, force = false) {
-      if (signal?.aborted) return Promise.reject(new Error("Race tracker request aborted."));
-      if (!force && this.cache && this.cache.expires > Date.now())
-        return Promise.resolve(this.cache.players);
-      let pending = this.pending;
-      if (!pending) {
-        const controller = new AbortController();
-        pending = { controller, readers: 0, promise: Promise.resolve(/* @__PURE__ */ new Map()) };
-        const current2 = pending;
-        current2.promise = requestSnapshot(controller.signal).then((data) => {
-          controller.signal.throwIfAborted();
-          const parsed = raceTrackerPlayers(data);
-          this.cache = parsed;
-          return parsed.players;
-        }).finally(() => {
-          if (this.pending === current2) this.pending = void 0;
-        });
-        this.pending = current2;
-      }
-      const current = pending;
-      current.readers++;
-      return new Promise((resolve, reject) => {
-        let finished = false;
-        const finish = (error, players) => {
-          if (finished) return;
-          finished = true;
-          signal?.removeEventListener("abort", abort);
-          if (--current.readers === 0 && this.pending === current) {
-            this.pending = void 0;
-            current.controller.abort();
-          }
-          if (error) reject(error);
-          else resolve(players);
-        };
-        const abort = () => finish(new Error("Race tracker request aborted."));
-        signal?.addEventListener("abort", abort, { once: true });
-        current.promise.then(
-          (players) => finish(void 0, players),
-          (error) => finish(error)
-        );
-      });
-    }
-  };
-
   // src/geoguessr/api.ts
   var RequestCache = class {
     entries = /* @__PURE__ */ new Map();
@@ -752,8 +601,8 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
         () => {
           entry.expires = Date.now() + ttl;
           if (this.entries.size > 100)
-            for (const [key2, cached] of this.entries) {
-              if (cached.expires !== Infinity) this.entries.delete(key2);
+            for (const [key2, cached2] of this.entries) {
+              if (cached2.expires !== Infinity) this.entries.delete(key2);
               if (this.entries.size <= 100) break;
             }
         },
@@ -770,10 +619,6 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     }
     scores = new ScoreIndex();
     cache = new RequestCache();
-    raceTracker = new RaceTrackerClient();
-    onlineRacePlayers(signal, force = false) {
-      return this.raceTracker.get(signal, force);
-    }
     async json(path2, label, options = {}) {
       const response = await this.page.fetch(path2, {
         credentials: "same-origin",
@@ -793,6 +638,16 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
       if (url.origin !== this.page.location.origin || !/^\/maps\/[^/]+\/?$/.test(url.pathname) || url.username || url.password)
         throw new Error("Unexpected random map URL.");
       return url.href;
+    }
+    /** The signed-in account's user ID. */
+    currentUserId() {
+      return this.cache.get("current-user", async () => {
+        const data = await this.json("/api/v3/profiles/", "Account API");
+        const user = data && typeof data === "object" && "user" in data ? data.user : void 0;
+        const id = user?.id ?? user?.userId;
+        if (typeof id !== "string" || !id) throw new Error("Sign in to recover this summary.");
+        return id;
+      });
     }
     userStatus(userId) {
       return this.cache.get(`user-status:${userId}`, async () => {
@@ -857,6 +712,139 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     }
   };
 
+  // src/core/native-styles.ts
+  var formats = [
+    // Vite: _[local]_[hash:5]_[line]
+    /^_(?<local>[A-Za-z][\w]*?)_(?<module>[a-z0-9]{5})_\d+$/,
+    // Next.js: [file]_[local]__[hash:5]
+    /^(?<module>[a-z][a-z0-9-]*)_(?<local>[A-Za-z][\w]*?)__[\w-]{5}$/
+  ];
+  function parseClass(name) {
+    for (const format of formats) {
+      const groups = name.match(format)?.groups;
+      if (groups) return { module: groups.module, local: groups.local };
+    }
+    return void 0;
+  }
+  var looseSelector = (local) => `[class*="_${local}_"]`;
+  var StyleIndex = class _StyleIndex {
+    modules = /* @__PURE__ */ new Map();
+    sheets = /* @__PURE__ */ new Map();
+    add(name, sheet = -1) {
+      const parsed = parseClass(name);
+      if (!parsed) return;
+      let locals = this.modules.get(parsed.module);
+      if (!locals) this.modules.set(parsed.module, locals = /* @__PURE__ */ new Map());
+      if (!locals.has(parsed.local)) locals.set(parsed.local, name);
+      if (sheet >= 0) {
+        let sheets = this.sheets.get(parsed.module);
+        if (!sheets) this.sheets.set(parsed.module, sheets = /* @__PURE__ */ new Set());
+        sheets.add(sheet);
+      }
+    }
+    clone() {
+      const copy = new _StyleIndex();
+      for (const [module, locals] of this.modules) copy.modules.set(module, new Map(locals));
+      for (const [module, sheets] of this.sheets) copy.sheets.set(module, new Set(sheets));
+      return copy;
+    }
+    /** The generated module key for a signature, or undefined when it is not loaded. */
+    find(spec2) {
+      return this.candidates(spec2)[0];
+    }
+    /** Every module matching a signature, best first; more than one means it is ambiguous. */
+    candidates(spec2) {
+      const score = (module) => {
+        const locals = this.modules.get(module);
+        return spec2.signature.filter((local) => locals.has(local)).length;
+      };
+      const all = spec2.signature.length;
+      let candidates = [...this.modules.keys()].filter((module) => score(module) === all);
+      if (!candidates.length) {
+        const best = Math.max(0, ...[...this.modules.keys()].map(score));
+        if (best < Math.min(2, all) || best * 2 < all) return [];
+        candidates = [...this.modules.keys()].filter((module) => score(module) === best);
+      }
+      if (candidates.length > 1 && spec2.near) {
+        const near = this.find(spec2.near);
+        const nearSheets = near ? this.sheets.get(near) : void 0;
+        const together = candidates.filter(
+          (module) => [...this.sheets.get(module) ?? []].some((sheet) => nearSheets?.has(sheet))
+        );
+        if (together.length) candidates = together;
+      }
+      return candidates;
+    }
+  };
+  function selectors(rules, visit) {
+    for (const rule of rules) {
+      if ("selectorText" in rule && typeof rule.selectorText === "string")
+        for (const match of rule.selectorText.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) visit(match[1]);
+      if ("cssRules" in rule) {
+        try {
+          selectors(rule.cssRules, visit);
+        } catch {
+        }
+      }
+    }
+  }
+  var sheetNames = /* @__PURE__ */ new WeakMap();
+  var cached;
+  function stylesheetIndex() {
+    const sheets = [];
+    for (const sheet of document.styleSheets) {
+      try {
+        sheets.push({ sheet, rules: sheet.cssRules });
+      } catch {
+      }
+    }
+    const key = sheets.flatMap(({ sheet, rules }) => [sheet, rules.length]);
+    if (cached && cached.key.length === key.length && cached.key.every((part, i) => part === key[i]))
+      return cached.index;
+    const index = new StyleIndex();
+    sheets.forEach(({ sheet, rules }, position) => {
+      let entry = sheetNames.get(sheet);
+      if (!entry || entry.rules !== rules.length) {
+        const names = [];
+        selectors(rules, (name) => names.push(name));
+        entry = { rules: rules.length, names };
+        sheetNames.set(sheet, entry);
+      }
+      for (const name of entry.names) index.add(name, position);
+    });
+    cached = { key, index };
+    return index;
+  }
+  function nativeStyles({ dom = true } = {}) {
+    const styled = stylesheetIndex();
+    const index = dom ? styled.clone() : styled;
+    if (dom)
+      for (const el of document.querySelectorAll("[class]"))
+        for (const name of el.classList) index.add(name);
+    const cache = /* @__PURE__ */ new Map();
+    function module(spec2) {
+      const cached2 = cache.get(spec2);
+      if (cached2) return cached2;
+      const key = index.find(spec2);
+      const locals = key ? index.modules.get(key) : /* @__PURE__ */ new Map();
+      const styledKey = styled.find(spec2);
+      const result = {
+        styled: !!styledKey && styledKey === key,
+        cls: (...names) => names.filter((name) => !!name).map((name) => locals.get(name)).filter(Boolean).join(" "),
+        sel: (local) => {
+          const name = locals.get(local);
+          return name ? `.${name}` : looseSelector(local);
+        }
+      };
+      cache.set(spec2, result);
+      return result;
+    }
+    return { module };
+  }
+  function nativeSelector(spec2, local) {
+    return nativeStyles({ dom: false }).module(spec2).sel(local);
+  }
+
   // src/geoguessr/routes.ts
   var duelRoute = /^\/(?:[a-z]{2}\/)?((?:team-)?duels)\/([a-f0-9]{24}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})(?:\/summary)?\/?$/i;
   function duelId(path2 = location.pathname) {
@@ -885,6 +873,160 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     }
   }
 
+  // src/geoguessr/styles.ts
+  var spec = (name, signature, near) => ({
+    name,
+    signature,
+    near
+  });
+  var profile = spec("profile", [
+    "staticWidgets",
+    "widgetRow",
+    "proBadgeWrapper",
+    "proBadge",
+    "headerMainContent"
+  ]);
+  var widget = spec("widget", [
+    "root",
+    "compact",
+    "widgetBorder",
+    "hasLoaded",
+    "widgetOuter",
+    "widgetInner",
+    "header",
+    "title",
+    "dividerWrapper",
+    "rightSlot"
+  ]);
+  var profileWidget = spec("profile widget", [
+    "header",
+    "icon",
+    "headerContent",
+    "widgetData",
+    "statContainer",
+    "widgetCarousel"
+  ]);
+  var headline = spec("headline", ["heading", "italic", "balanceTextWrap"]);
+  var typography = spec("typography", ["boldWeight", "white60Variant"]);
+  var button = spec("button", [
+    "button",
+    "variantTertiary",
+    "sizeSmall",
+    "wrapper",
+    "label",
+    "loadingIndicator"
+  ]);
+  var carousel = spec("carousel", [
+    "carouselContainer",
+    "carouselWrapper",
+    "carouselInner",
+    "spread",
+    "indicatorWrapper",
+    "indicator",
+    "green",
+    "red",
+    "active",
+    "arrowButton",
+    "leftArrowButton",
+    "rightArrowButton",
+    "arrowSvg"
+  ]);
+  var historyModal = spec("game history modal", [
+    "root",
+    "divisionHeader",
+    "divisionHeaderText",
+    "dropdownContainer",
+    "dropdown",
+    "leaderboardWrapper",
+    "separator",
+    "carouselRoot",
+    "carouselItem"
+  ]);
+  var historyList = spec("game history list", ["root", "leaderboardContainer", "list"]);
+  var historyItem = spec("game history item", [
+    "item",
+    "link",
+    "card",
+    "cardOverlay",
+    "arrow",
+    "tie",
+    "primaryUserWon",
+    "opponentWon",
+    "gameData",
+    "gameDataSide",
+    "gameDataSideLeft",
+    "gameDataSideRight",
+    "avatarCell",
+    "centerColumn",
+    "mode",
+    "vs",
+    "date"
+  ]);
+  var historyPlayer = spec(
+    "game history player",
+    ["left", "right", "victory", "defeat", "tie", "rating", "ratingLabel"],
+    historyItem
+  );
+  var historyNick = spec("game history nick", ["root", "identity", "nick"], historyItem);
+  var avatar = spec("avatar", [
+    "titleAvatar",
+    "titleAvatarImage",
+    "titleAvatarBorder",
+    "titleAvatarBorderImage",
+    "image"
+  ]);
+  var select = spec("select", [
+    "dropdown",
+    "select",
+    "sizeDefault",
+    "variantLightTransparent",
+    "arrow"
+  ]);
+  var overlayModal = spec("overlay modal", [
+    "backlight",
+    "backlightDark",
+    "isAnimated",
+    "blurBackground",
+    "contentContainer",
+    "alignVerticallyCenter",
+    "content",
+    "sizeLarge",
+    "fullHeight",
+    "closeButton",
+    "closeButtonWhite"
+  ]);
+  var overlayPortal = spec("overlay portal", ["destination", "destinationWithinChrome"]);
+  var layout = spec("layout", ["fullOverlay", "sidebar", "mainOverlay"]);
+  var spacer = spec("spacer", ["space", "height", "xlHeight"]);
+  var menu = spec("header menu", ["dropdownContainer", "dropdown", "hoverEffect"]);
+  var menuItem = spec("header menu item", [
+    "dropdownItem",
+    "noBorder",
+    "image",
+    "title",
+    "description"
+  ]);
+  var errorPage = spec("error page", [
+    "errorPage",
+    "heading",
+    "title",
+    "cta",
+    "illustration"
+  ]);
+  var mapScores = spec("map scores", [
+    "rowContainer",
+    "row",
+    "cellDate",
+    "cellPoints",
+    "expandButton"
+  ]);
+  var media = (hash, width = 512) => `/images/resize:fit:${width}:0/gravity:ce/plain/media/sha256/${hash}.webp`;
+  var images = {
+    recentDuels: media("715db2907508a299c7054a05234d6832456b64fd15e5512d223d6ffe2d90fd0e"),
+    rankedDuels: media("faee11a802cc9615cfe4351bd91a72afa6fe3f1cb757b4e41a87cb3b0eb1d8bb"),
+    maps: media("601548a6eee2222041bb0e8dac00d949b88b740ef8cc4b06c9e890b2f58459ff", 128)
+  };
+
   // src/geoguessr/summary.ts
   function summaryShape(game) {
     const options = game.options || {};
@@ -904,6 +1046,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
         isTeamDuels: !!options.isTeamDuels,
         mapName: options.map?.name || "Recovered duel",
         mapSlug: options.mapSlug || options.map?.slug,
+        maxRoundTime: options.maxRoundTime ?? 0,
         mode: options.movementOptions?.forbidRotating ? "NoMoveNoZoom" : options.movementOptions?.forbidMoving ? "NoMove" : "Moving",
         roundWinMultiplierIncrement: options.roundWinMultiplierIncrement || 0
       },
@@ -926,23 +1069,16 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
       }))
     };
   }
-  function nativeProps(initial, current, game) {
-    const shared = { ...initial.props, ...current };
-    return {
-      ...shared,
-      __N_SSP: true,
-      pageProps: {
-        ...initial.props?.pageProps,
-        ...current?.pageProps,
-        statusCode: 200,
-        game: summaryShape(game),
-        userId: shared.accountProps?.account?.user?.userId ?? current?.pageProps?.userId ?? initial.props?.pageProps?.userId
-      }
-    };
+  function summaryProps(game, userId, current = {}) {
+    return { ...current, statusCode: 200, game: summaryShape(game), userId };
   }
 
   // src/features/summary-recovery.ts
-  var errorSelector = '[class*="error_errorPage__"]';
+  var summaryRoute = /\/(?:team-)?duels\/\$token\/summary\/?$/;
+  var errorSelector = () => nativeSelector(errorPage, "errorPage");
+  function summaryMatch(router) {
+    return router?.state?.matches?.find((match) => summaryRoute.test(match.routeId ?? ""));
+  }
   var summaryRecovery = {
     id: "summary-recovery",
     name: "Recover old duel summaries",
@@ -960,47 +1096,41 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
       }
       const valid = (id, version) => scope.active && visit === version && duelId() === id;
       function status(message) {
-        const errorPage = document.querySelector(errorSelector);
-        if (!errorPage) return;
-        let line = errorPage.querySelector("[data-summary-recovery]");
+        const errorPage2 = document.querySelector(errorSelector());
+        if (!errorPage2) return;
+        let line = errorPage2.querySelector("[data-summary-recovery]");
         if (!line) {
           line = document.createElement("p");
           line.dataset.summaryRecovery = "";
-          line.className = errorPage.querySelector("p")?.className || "";
+          line.className = errorPage2.querySelector("p")?.className || "";
           line.setAttribute("role", "status");
           line.style.marginTop = "12px";
-          errorPage.append(line);
+          errorPage2.append(line);
         }
         if (line.textContent !== message) line.textContent = message;
       }
-      async function repair(game, initial, router, version) {
-        const payload = nativeProps(initial, router.components?.[router.route]?.props, game);
-        const summaryPath = location.pathname.match(/\/(?:team-)?duels\//)[0] + game.gameId + "/summary.json";
-        const originalUrl = location.pathname + location.search + location.hash;
-        const target = new URL(location.href);
-        target.pathname = target.pathname.replace(/\/?$/, "").replace(/(?:\/summary)?$/, "/summary");
-        target.searchParams.set("gg_summary_recovery", String(Date.now()));
+      async function repair(game, userId, router, version) {
+        const payload = summaryProps(game, userId, summaryMatch(router)?.loaderData?.props);
         let intercepted = false;
         const remove = scope.own(
           network2.intercept((url) => {
-            if (valid(game.gameId, version) && url.origin === location.origin && url.pathname.includes("/_next/data/") && url.pathname.endsWith(summaryPath)) {
-              intercepted = true;
-              return new page2.Response(JSON.stringify(payload), {
-                status: 200,
-                headers: { "content-type": "application/json" }
-              });
-            }
-            return void 0;
+            if (!valid(game.gameId, version) || url.origin !== location.origin || !url.pathname.startsWith("/_serverFn/"))
+              return void 0;
+            const query = decodeURIComponent(url.search);
+            if (!/duels\/\[token\]\/summary/.test(query) || !query.includes(game.gameId))
+              return void 0;
+            intercepted = true;
+            return new page2.Response(JSON.stringify(payload), {
+              status: 200,
+              headers: { "content-type": "application/json" }
+            });
           })
         );
         let timer;
         let abort;
         try {
-          const result = await Promise.race([
-            router.replace(target.pathname + target.search + target.hash, void 0, {
-              shallow: false,
-              scroll: false
-            }),
+          await Promise.race([
+            router.invalidate(),
             new Promise((_, reject) => {
               timer = setTimeout(() => reject(new Error("Native recovery timed out.")), 12e3);
               abort = () => reject(new Error("Recovery disabled."));
@@ -1008,36 +1138,35 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
             })
           ]);
           if (!valid(game.gameId, version)) return;
-          if (!intercepted || result === false) throw new Error("Native recovery did not complete.");
+          if (!intercepted) throw new Error("Native recovery did not complete.");
           await new Promise(
             (resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
           );
-          if (valid(game.gameId, version) && document.querySelector(errorSelector))
+          if (valid(game.gameId, version) && document.querySelector(errorSelector()))
             throw new Error("The summary is still unavailable.");
         } finally {
           clearTimeout(timer);
           if (abort) scope.signal.removeEventListener("abort", abort);
           remove();
-          if (visit === version && duelId() === game.gameId && location.pathname + location.search + location.hash === target.pathname + target.search + target.hash)
-            page2.history.replaceState(page2.history.state, "", originalUrl);
         }
       }
       async function check() {
-        const id = syncVisit(), version = visit, router = page2.next?.router;
-        if (!id || busy || attempted || !router?.isReady || !document.querySelector(errorSelector))
+        const id = syncVisit(), version = visit, router = page2.__TSR_ROUTER__;
+        const shown = document.querySelector(errorSelector());
+        if (!id || busy || attempted || !router || !shown) return;
+        if (!hydrated(shown)) {
+          setTimeout(() => scope.active && events2.schedule(), 150);
           return;
+        }
         try {
-          const initial = JSON.parse(
-            document.getElementById("__NEXT_DATA__")?.textContent || "{}"
-          );
-          const current = router.components?.[router.route]?.props?.pageProps;
-          const broken = current?.statusCode === 404 || initial.query?.token === id && initial.props?.pageProps?.statusCode === 404 || /Game not found|This game couldn't be found/i.test(document.body?.textContent || "");
+          const props = summaryMatch(router)?.loaderData?.props;
+          const broken = props?.statusCode === 404 || /Game not found|couldn.t be found/i.test(document.body?.textContent || "");
           if (!broken) return;
           attempted = true;
           busy = true;
           status("Trying to display this summary\u2026");
-          const game = await api2.finishedDuel(id);
-          if (valid(id, version)) await repair(game, initial, router, version);
+          const [game, userId] = await Promise.all([api2.finishedDuel(id), api2.currentUserId()]);
+          if (valid(id, version)) await repair(game, userId, router, version);
         } catch (error) {
           if (valid(id, version)) {
             console.error("[BetterGEO summary recovery]", error);
@@ -1064,7 +1193,6 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     description: "Add links to game results in the My Games score history on each map page.",
     enable({ events: events2, api: api2 }, scope) {
       const games = api2.scores;
-      const rowSelector = 'button[class*="map-detail-leaderboard_row__"], button[aria-expanded]';
       function clearResult(container) {
         container.querySelector(":scope > .gg-result-action")?.remove();
         container.classList.remove("gg-result-row");
@@ -1076,17 +1204,18 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
           document.querySelectorAll(".gg-result-row").forEach(clearResult);
           return;
         }
+        const rowSelector = `button${nativeSelector(mapScores, "row")}, button[aria-expanded]`;
         for (const row of document.querySelectorAll(rowSelector)) {
           const container = row.parentElement;
-          if (!container) continue;
-          const date = row.querySelector('[class*="cellDate__"] [title]') || [...row.querySelectorAll("[title]")].find(
+          if (!container || !hydrated(row)) continue;
+          const date = row.querySelector(`${looseSelector("cellDate")} [title]`) || [...row.querySelectorAll("[title]")].find(
             (el) => Number.isFinite(Date.parse(el.title))
           );
           if (!date) {
             clearResult(container);
             continue;
           }
-          const points = row.querySelector('[class*="cellPoints__"]');
+          const points = row.querySelector(looseSelector("cellPoints"));
           const timestamp = Date.parse(date.title);
           const scoreText = points?.textContent || row.textContent?.match(/([\d,\s]+)\s*pts\b/i)?.[1];
           const digits = scoreText?.replace(/[^0-9]/g, "");
@@ -1104,7 +1233,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
           }
           const href = `${location.origin}${resultPath(tokens.values().next().value)}`;
           container.classList.add("gg-result-row");
-          const arrow2 = row.querySelector('[class*="expandButton__"]') || row.lastElementChild;
+          const arrow2 = row.querySelector(looseSelector("expandButton")) || row.lastElementChild;
           if (arrow2) {
             const offset = `${Math.max(24, row.getBoundingClientRect().right - arrow2.getBoundingClientRect().left + 8)}px`;
             if (container.style.getPropertyValue("--gg-icon-right") !== offset)
@@ -1124,15 +1253,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
           icon.alt = "";
           icon.width = 18;
           icon.height = 18;
-          icon.addEventListener(
-            "error",
-            () => {
-              const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7" r="1" fill="white" stroke="none"/></svg>';
-              icon.src = "data:image/svg+xml," + encodeURIComponent(svg);
-            },
-            { once: true }
-          );
-          icon.src = "/_next/static/media/info.1c18ae42.svg";
+          icon.src = "data:image/svg+xml," + encodeURIComponent(infoIcon);
           link2.appendChild(icon);
           const action = document.createElement("div");
           action.className = "gg-result-action";
@@ -1159,6 +1280,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
       });
     }
   };
+  var infoIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7" r="1" fill="white" stroke="none"/></svg>';
   var CSS = `
 .gg-result-row {
   display: grid !important;
@@ -1224,98 +1346,37 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
 }
 `;
 
-  // src/core/native-styles.ts
-  function nativeStyles(hints = {
-    widget_header___ZOfT: '[class*="widget_widgetInner__"] > [class*="widget_header__"]',
-    widget_header__8mkus: '[class*="widget_title__"] > [class*="widget_header__"]'
-  }) {
-    const names = /* @__PURE__ */ new Set();
-    function scan(rules) {
-      for (const rule of rules) {
-        if ("selectorText" in rule && typeof rule.selectorText === "string") {
-          for (const match of rule.selectorText.matchAll(/\.([a-zA-Z_][\w-]*__[\w-]+)/g))
-            names.add(match[1]);
-        }
-        if ("cssRules" in rule) {
-          try {
-            scan(rule.cssRules);
-          } catch {
-          }
-        }
-      }
-    }
-    for (const sheet of document.styleSheets) {
-      try {
-        scan(sheet.cssRules);
-      } catch {
-      }
-    }
-    const styledNames = new Set(names);
-    for (const el of document.querySelectorAll("[class]"))
-      for (const name of el.classList) names.add(name);
-    const cache = /* @__PURE__ */ new Map();
-    const byPrefix = /* @__PURE__ */ new Map();
-    for (const name of names) {
-      const prefix = name.slice(0, -5);
-      const group = byPrefix.get(prefix) ?? [];
-      group.push(name);
-      byPrefix.set(prefix, group);
-    }
-    function resolveOne(name) {
-      const cached = cache.get(name);
-      if (cached) return cached;
-      const prefix = name.slice(0, -5), candidates = byPrefix.get(prefix) ?? [];
-      const styled = candidates.filter((candidate) => styledNames.has(candidate));
-      const hint = hints[name];
-      const contextual = hint ? [...document.querySelector(hint)?.classList ?? []].find(
-        (candidate) => candidate.startsWith(prefix) && candidate.length === name.length
-      ) : void 0;
-      let result = name;
-      if (styledNames.has(name)) result = name;
-      else if (contextual && (!styled.length || styledNames.has(contextual))) result = contextual;
-      else if (styled.length === 1) result = styled[0];
-      else if (!names.has(name) && candidates.length === 1) result = candidates[0];
-      cache.set(name, result);
-      return result;
-    }
-    const resolve = (...snapshot) => snapshot.map(resolveOne).join(" ");
-    return {
-      resolve,
-      has: (prefix) => [...styledNames].some((name) => name.startsWith(prefix))
-    };
-  }
-
   // src/core/profile-widget.ts
-  function profileWidget(title, icon) {
-    const styles = nativeStyles(), c = styles.resolve;
-    const root = element("div", c("profile-v2_widgetRow__n1A_N"));
-    const widget = element("div", c("widget_root__KcxU_", "widget_compact__eg_L_"));
-    const border = element("div", c("widget_widgetBorder__aJQpv", "widget_hasLoaded__0Izv8"));
-    const outer = element("div", c("widget_widgetOuter__SOAB_"));
-    const inner = element("div", c("widget_widgetInner__qg276"));
+  function profileWidget2(title, icon) {
+    const styles = nativeStyles();
+    const profile2 = styles.module(profile), frame = styles.module(widget), card = styles.module(profileWidget), headline2 = styles.module(headline), text = styles.module(typography);
+    const root = element("div", profile2.cls("widgetRow"));
+    const widget2 = element("div", frame.cls("root", "compact"));
+    const border = element("div", frame.cls("widgetBorder", "hasLoaded"));
+    const outer = element("div", frame.cls("widgetOuter"));
+    const inner = element("div", frame.cls("widgetInner"));
     const heading = element(
       "h2",
-      c("headline_heading__Bc8S9", "shared_boldWeight__VXL2d", "headline_italic__im8EF"),
+      [headline2.cls("heading"), text.cls("boldWeight"), headline2.cls("italic")].join(" ").trim(),
       title
     );
     heading.style.cssText = "--fs:var(--font-size-16);--lh:var(--line-height-16)";
-    const header = element("div", c("widget_header___ZOfT", "widget_compact__eg_L_"));
-    const titleSlot = element("div", c("widget_title___eiUb"));
-    const titleRow = element("div", c("widget_header__8mkus"));
-    const content = element("div", c("widget_headerContent__Ljohq"));
+    const header = element("div", frame.cls("header", "compact"));
+    const titleSlot = element("div", frame.cls("title"));
+    const titleRow = element("div", card.cls("header"));
+    const content = element("div", card.cls("headerContent"));
     content.append(heading);
-    icon.className = c("widget_icon__b0v5w");
-    titleRow.append(icon);
-    titleRow.append(content);
+    icon.className = card.cls("icon");
+    titleRow.append(icon, content);
     titleSlot.append(titleRow);
     header.append(titleSlot);
     const body = element("div");
-    inner.append(header, element("div", c("widget_dividerWrapper__tCjRQ")), body);
+    inner.append(header, element("div", frame.cls("dividerWrapper")), body);
     outer.append(inner);
     border.append(outer);
-    widget.append(border);
-    root.append(widget);
-    return { root, body, inner, header, content, styles };
+    widget2.append(border);
+    root.append(widget2);
+    return { root, body, inner, header, titleRow, content, styles };
   }
 
   // src/core/profile.ts
@@ -1340,6 +1401,10 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
         if (!id || !document.head || loading) return;
         const target = options.target();
         if (!target) return;
+        if (!hydrated(target)) {
+          setTimeout(() => scope.active && events2.schedule(), 150);
+          return;
+        }
         const current = visit;
         const valid = () => scope.active && current === visit && viewedProfileId() === id;
         if (!attempted) {
@@ -1361,7 +1426,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     );
   }
   function profileWidgets() {
-    return document.querySelector('[class*="profile-v2_staticWidgets__"]') || document.querySelector('[class*="profile-v2_widgetRow__"]')?.parentElement;
+    return document.querySelector(nativeSelector(profile, "staticWidgets")) || document.querySelector(nativeSelector(profile, "widgetRow"))?.parentElement;
   }
 
   // src/features/country-performance.ts
@@ -1370,7 +1435,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     name: "Country ranked stats",
     description: "Show a player\u2019s best and worst countries from ranked progress on their profile.",
     enable({ api: api2, events: events2 }, scope) {
-      let widget;
+      let widget2;
       const style = element("style");
       style.textContent = CSS2;
       scope.own(() => style.remove());
@@ -1379,20 +1444,20 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
         target: profileWidgets,
         load: (id) => api2.rankedCountries(id),
         reset() {
-          widget?.remove();
-          widget = void 0;
+          widget2?.remove();
+          widget2 = void 0;
         },
         render(data, _, container) {
-          if (widget?.isConnected || !data.bestCountries.length && !data.worstCountries.length)
+          if (widget2?.isConnected || !data.bestCountries.length && !data.worstCountries.length)
             return;
           if (!style.isConnected) document.head.append(style);
-          widget = countryPerformanceView(data);
+          widget2 = countryPerformanceView(data);
           const ranked = [...container.querySelectorAll("h2")].find(
             (heading) => /^ranked (?:duels|solo)$/i.test(heading.textContent?.trim() ?? "")
           );
-          const rankedRow = ranked?.closest('[class*="profile-v2_widgetRow__"]');
-          if (rankedRow && container.contains(rankedRow)) rankedRow.after(widget);
-          else container.prepend(widget);
+          const rankedRow = ranked?.closest(nativeSelector(profile, "widgetRow"));
+          if (rankedRow && container.contains(rankedRow)) rankedRow.after(widget2);
+          else container.prepend(widget2);
         }
       });
     }
@@ -1401,17 +1466,20 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     const rankedHeading = [...document.querySelectorAll("h2")].find(
       (heading) => /^ranked (?:duels|solo)$/i.test(heading.textContent?.trim() ?? "")
     );
-    const nativeIcon = rankedHeading?.closest('[class*="widget_title__"]')?.querySelector("img");
+    const nativeIcon = rankedHeading?.closest(nativeSelector(widget, "title"))?.querySelector("img");
     const icon = nativeIcon ? nativeIcon.cloneNode(false) : element("img");
-    if (!nativeIcon)
-      icon.src = "/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fgamemode-duels.f0444913.webp&w=256&q=75";
+    if (!nativeIcon) icon.src = images.rankedDuels;
     icon.removeAttribute("id");
     icon.alt = "";
     icon.width = 40;
     icon.height = 40;
     icon.loading = "lazy";
-    const { root, body, inner, header, content } = profileWidget("Country ranked stats", icon);
+    const { root, body, inner, header, titleRow, content } = profileWidget2(
+      "Country ranked stats",
+      icon
+    );
     header.classList.add("bettergeo-country-header");
+    titleRow.classList.add("bettergeo-country-title");
     content.append(element("small", "bettergeo-country-credit", "Ranked Solo \xB7 BetterGEO"));
     root.id = "bettergeo-country-performance";
     root.classList.add("bettergeo-country-performance");
@@ -1462,7 +1530,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
 .bettergeo-country-header {
   padding: 10px 12px;
 }
-.bettergeo-country-header [class*='widget_header__'] {
+.bettergeo-country-title {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1548,28 +1616,33 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
 
   // src/core/navigation-menu.ts
   function dropdownLists() {
-    const lists = [...document.querySelectorAll('[class*="menu-item_dropdown__"], [role="menu"]')];
+    const lists = [
+      ...document.querySelectorAll(`${nativeSelector(menu, "dropdown")}, [role="menu"]`)
+    ].filter((list) => list.querySelector("a[href]"));
     return lists.filter(
       (parent) => !lists.some((child) => child !== parent && parent.contains(child))
     );
   }
   function menuEntry(tag, titleText, descriptionText, icon, template) {
-    const c = nativeStyles().resolve;
-    const item = element(
-      tag,
-      template?.className ?? c("link_anchor__TGl1_", "menu-dropdown-item_dropdownItem__k29Nw")
+    const item = nativeStyles().module(menuItem);
+    const node2 = element(tag, template?.className || item.cls("dropdownItem"));
+    icon.setAttribute(
+      "class",
+      template?.querySelector("img")?.getAttribute("class") || item.cls("image")
     );
-    icon.setAttribute("class", c("menu-dropdown-item_image__r1egm"));
-    const title = element("div", c("menu-dropdown-item_title__4U4eM"), titleText);
-    const description = element("div", c("menu-dropdown-item_description__uVic7"), descriptionText);
-    item.append(icon, title, description);
-    return { item, title };
+    const title = element("div", item.cls("title"), titleText);
+    const description = element("div", item.cls("description"), descriptionText);
+    node2.append(icon, title, description);
+    return { item: node2, title };
   }
   function insertMenuEntry(container, item) {
-    container.insertBefore(
-      item,
-      container.querySelector(':scope > [class*="menu-dropdown-secondary_container__"]')
+    const selector = nativeSelector(menuItem, "dropdownItem");
+    const native = [...container.children].filter(
+      (child) => child !== item && child.matches(selector) && !Object.keys(child.dataset).some((key) => key.startsWith("bettergeo"))
     );
+    const last = native.at(-1);
+    if (last) last.after(item);
+    else container.append(item);
   }
 
   // src/features/tournaments-link.ts
@@ -1675,30 +1748,30 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
 }
 `;
       scope.own(() => {
-        mounts.forEach((node) => node.remove());
+        mounts.forEach((node2) => node2.remove());
         mounts.clear();
         pendingTabs.forEach((tab) => tab.close());
         pendingTabs.clear();
         style.remove();
       });
-      async function choose(event, button, label) {
+      async function choose(event, button2, label) {
         if (event.type === "auxclick" && event.button !== 1) return;
         if (event.type === "click" && event.button !== 0) return;
         event.preventDefault();
         event.stopPropagation();
         if (busy || !scope.active) return;
         const startingUrl = page2.location.href;
-        button.title = "Open a random community map";
+        button2.title = "Open a random community map";
         const newTab = event.button === 1 || event.ctrlKey || event.metaKey || event.shiftKey;
         let tab;
         try {
           tab = newTab ? page2.open("about:blank", "_blank") : null;
         } catch {
-          button.title = "Could not open a new tab. Try a normal click.";
+          button2.title = "Could not open a new tab. Try a normal click.";
           return;
         }
         if (newTab && !tab) {
-          button.title = "Allow pop-ups to open a random map in a new tab.";
+          button2.title = "Allow pop-ups to open a random map in a new tab.";
           return;
         }
         if (tab) {
@@ -1706,8 +1779,8 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
           pendingTabs.add(tab);
         }
         busy = true;
-        button.disabled = true;
-        button.setAttribute("aria-busy", "true");
+        button2.disabled = true;
+        button2.setAttribute("aria-busy", "true");
         label.textContent = "Finding map\u2026";
         try {
           const url = await api2.randomMapUrl();
@@ -1720,22 +1793,22 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
           if (tab && pendingTabs.delete(tab)) tab.close();
           if (scope.active) {
             console.error("[BetterGEO random map]", error);
-            button.title = "Could not load a random map. Click to try again.";
+            button2.title = "Could not load a random map. Click to try again.";
             label.textContent = "Retry random map";
           }
         } finally {
           busy = false;
           if (scope.active) {
-            button.disabled = false;
-            button.removeAttribute("aria-busy");
+            button2.disabled = false;
+            button2.removeAttribute("aria-busy");
             if (label.textContent === "Finding map\u2026") label.textContent = "Random Map";
           }
         }
       }
       function mount() {
-        for (const [anchor, node] of mounts)
-          if (!anchor.isConnected || !node.isConnected) {
-            node.remove();
+        for (const [anchor, node2] of mounts)
+          if (!anchor.isConnected || !node2.isConnected) {
+            node2.remove();
             mounts.delete(anchor);
           }
         if (!document.head) return;
@@ -1746,32 +1819,31 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
           const maps = [...anchor.querySelectorAll("a[href]")].find(isMapsLink);
           const originalIcon = maps?.querySelector("img");
           const icon = originalIcon ? originalIcon.cloneNode(false) : element("img");
-          if (!originalIcon)
-            icon.src = "/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fmaps.4f8b2837.webp&w=128&q=75";
+          if (!originalIcon) icon.src = images.maps;
           icon.removeAttribute("id");
           icon.alt = "";
           icon.width = 56;
           icon.height = 56;
           icon.loading = "lazy";
-          const { item: button, title: label } = menuEntry(
+          const { item: button2, title: label } = menuEntry(
             "button",
             "Random Map",
             "Discover a random community map",
             icon,
             maps
           );
-          button.classList.add("bettergeo-random-map-button");
-          button.dataset.bettergeoRandomMap = "";
-          button.type = "button";
-          button.title = "Open a random community map";
-          button.addEventListener("click", (event) => {
-            void choose(event, button, label);
+          button2.classList.add("bettergeo-random-map-button");
+          button2.dataset.bettergeoRandomMap = "";
+          button2.type = "button";
+          button2.title = "Open a random community map";
+          button2.addEventListener("click", (event) => {
+            void choose(event, button2, label);
           });
-          button.addEventListener("auxclick", (event) => {
-            void choose(event, button, label);
+          button2.addEventListener("auxclick", (event) => {
+            void choose(event, button2, label);
           });
-          insertMenuEntry(anchor, button);
-          mounts.set(anchor, button);
+          insertMenuEntry(anchor, button2);
+          mounts.set(anchor, button2);
         }
       }
       scope.own(events2.subscribe(mount));
@@ -1821,7 +1893,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
       scope.own(() => style.remove());
       watchProfile(events2, scope, {
         name: "profile status",
-        target: () => document.querySelector('[class*="profile-v2_headerMainContent__"]'),
+        target: () => document.querySelector(nativeSelector(profile, "headerMainContent")),
         load: (id) => api2.userStatus(id),
         reset() {
           clearTimeout(timer);
@@ -1839,10 +1911,11 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
             removeBadge();
             badge = statusBadge(data);
             if (!badge) return;
+            const wrapperSelector = nativeSelector(profile, "proBadgeWrapper");
             const pro = header.querySelector(
-              '[data-qa="pro-tier"], [class*="profile-v2_proBadge__"]'
+              `[data-qa="pro-tier"], ${nativeSelector(profile, "proBadge")}`
             );
-            const wrapper = pro?.closest('[class*="profile-v2_proBadgeWrapper__"]') ?? header.querySelector('[class*="profile-v2_proBadgeWrapper__"]');
+            const wrapper = pro?.closest(wrapperSelector) ?? header.querySelector(wrapperSelector);
             if (wrapper) {
               row = wrapper;
               row.classList.add("bettergeo-badges-row");
@@ -1893,7 +1966,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     if (!state.banned && state.suspension !== "active") return void 0;
     const badge = element(
       "p",
-      `${nativeStyles().resolve("profile-v2_proBadge__Wlpxj")} bettergeo-restriction-badge`
+      `${nativeStyles().module(profile).cls("proBadge")} bettergeo-restriction-badge`.trim()
     );
     badge.append(
       element("span", "bettergeo-restriction-label", state.banned ? "Banned" : "Suspended")
@@ -1946,64 +2019,59 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     NoMoveDuels: "No move",
     StandardDuels: "Moving"
   };
-  var assets = {
-    recent: "/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fgamemode-recent.322c02eb.webp&w=640&q=75",
-    replay: "/_next/static/media/replay.42141ac7.svg",
-    summary: "/_next/static/media/location-pin.f96f50a0.svg"
-  };
+  function node(tag, native, hook, text) {
+    return element(tag, `${native} bgh-${hook}`.trim(), text);
+  }
   function historyView(entries, userId, showAll) {
-    const icon = image(assets.recent, "", 224, 230);
+    const icon = image(images.recentDuels, "", 512, 512);
     icon.alt = "recent duels";
-    const { root: widget, body, header, content, styles } = profileWidget("Recent Duels", icon);
-    const c = styles.resolve;
-    widget.classList.add("bettergeo-history");
-    widget.id = "bettergeo-match-history";
-    if (!styles.has("game-history-list-item_card__"))
-      widget.classList.add("bettergeo-history-fallback");
+    const { root: widget2, body, header, content, styles } = profileWidget2("Recent Duels", icon);
+    widget2.classList.add("bettergeo-history");
+    widget2.id = "bettergeo-match-history";
+    if (!styles.module(historyItem).styled) widget2.classList.add("bettergeo-history-fallback");
     content.classList.add("bettergeo-history-title-line");
     content.append(element("small", "bettergeo-history-credit", "(unhidden by BetterGEO)"));
-    const right = element("div", c("widget_rightSlot__rRuhJ"));
+    const right = node("div", styles.module(widget).cls("rightSlot"), "right-slot");
     const all = nativeButton("View all", styles);
     all.addEventListener("click", showAll);
     right.append(all);
     header.append(right);
-    body.replaceWith(carousel(entries.slice(0, 5), userId, styles));
-    return widget;
+    body.replaceWith(carousel2(entries.slice(0, 5), userId, styles));
+    return widget2;
   }
-  function nativeButton(text, styles = nativeStyles()) {
-    const c = styles.resolve;
-    const button = element(
-      "button",
-      c("button_button__HOmVR", "button_variantTertiary__WLCY9", "button_sizeSmall__1lL87")
-    );
-    button.type = "button";
-    const wrapper = element("div", c("button_wrapper__C_4h8"));
-    wrapper.append(element("span", c("button_label__mIsIc"), text));
-    button.append(wrapper);
-    return button;
+  function nativeButton(text, styles) {
+    const b = styles.module(button);
+    const button2 = node("button", b.cls("button", "variantTertiary", "sizeSmall"), "button");
+    button2.type = "button";
+    const wrapper = element("div", b.cls("wrapper"));
+    wrapper.append(element("span", b.cls("label"), text));
+    button2.append(wrapper);
+    return button2;
   }
-  function carousel(entries, userId, styles) {
-    const c = styles.resolve;
-    const widgetCarousel = element("div", c("widget_widgetCarousel__IAEDC"));
-    const root = element("div", c("game-history-modal_carouselRoot__xADZm"));
-    const container = element("div", c("carousel_carouselContainer__E1d_M"));
-    const wrapper = element("div", c("carousel_carouselWrapper__OeuWZ"));
-    const inner = element("div", c("carousel_carouselInner__n0vjp"));
-    const spread = element("div", c("carousel_spread__YVvsz"));
-    const item = element("div", c("game-history-modal_carouselItem__gZWWQ"));
+  function carousel2(entries, userId, styles) {
+    const c = styles.module(carousel), modal = styles.module(historyModal);
+    const widgetCarousel = element("div", styles.module(profileWidget).cls("widgetCarousel"));
+    const root = element("div", modal.cls("carouselRoot"));
+    const container = node("div", c.cls("carouselContainer"), "carousel");
+    const wrapper = node("div", c.cls("carouselWrapper"), "carousel-wrapper");
+    const inner = element("div", c.cls("carouselInner"));
+    const spread = element("div", c.cls("spread"));
+    const item = element("div", modal.cls("carouselItem"));
     item.style.cssText = "width:min(100%,640px);max-width:100%;flex:0 0 auto;margin-inline:auto";
     spread.style.cssText = "width:100%;display:flex;justify-content:center";
     spread.append(item);
     inner.append(spread);
     wrapper.append(inner);
-    const indicators = element("div", c("carousel_indicatorWrapper__MlquS"));
+    const indicators = node("div", c.cls("indicatorWrapper"), "indicators");
     let index = 0;
     const left = arrow("Previous duel", "left", styles), right = arrow("Next duel", "right", styles);
+    const active = c.cls("active") || "bgh-active";
     const dots = entries.map((entry, position) => {
       const won = entry.duel?.winnerId === userId;
-      const dot = element(
+      const dot = node(
         "button",
-        c("carousel_indicator__FO2KP", won ? "carousel_green__8yLi7" : "carousel_red__vZJ2m")
+        c.cls("indicator", won ? "green" : "red"),
+        `indicator bgh-${won ? "green" : "red"}`
       );
       dot.type = "button";
       dot.setAttribute("aria-label", `Show duel ${position + 1}`);
@@ -2024,7 +2092,8 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
       left.style.visibility = left.disabled ? "hidden" : "";
       right.style.visibility = right.disabled ? "hidden" : "";
       dots.forEach((dot, i) => {
-        dot.classList.toggle(c("carousel_active__Epbsk"), i === index);
+        dot.classList.toggle(active, i === index);
+        dot.classList.toggle("bgh-active", i === index);
         dot.setAttribute("aria-current", i === index ? "true" : "false");
       });
       item.setAttribute("aria-label", `Duel ${index + 1} of ${entries.length}`);
@@ -2050,18 +2119,16 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     return widgetCarousel;
   }
   function arrow(label, side, styles) {
-    const c = styles.resolve;
-    const button = element(
+    const c = styles.module(carousel);
+    const button2 = node(
       "button",
-      c(
-        "carousel_arrowButton__XGlCA",
-        side === "left" ? "carousel_leftArrowButton__ifAeT" : "carousel_rightArrowButton__VF_2e"
-      )
+      c.cls("arrowButton", side === "left" ? "leftArrowButton" : "rightArrowButton"),
+      "arrow-button"
     );
-    button.type = "button";
-    button.setAttribute("aria-label", label);
+    button2.type = "button";
+    button2.setAttribute("aria-label", label);
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("class", c("carousel_arrowSvg__XrIgh"));
+    svg.setAttribute("class", `${c.cls("arrowSvg")} bgh-arrow-svg`.trim());
     svg.setAttribute("viewBox", "0 0 24 24");
     svg.setAttribute("aria-hidden", "true");
     const path2 = document.createElementNS(svg.namespaceURI, "path");
@@ -2070,11 +2137,11 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
       side === "left" ? "M17,23a1,1,0,0,1-.707-.293l-10-10a1,1,0,0,1,0-1.414l10-10a1,1,0,0,1,1.414,1.414L8.414,12l9.293,9.293A1,1,0,0,1,17,23Z" : "M7,23a1,1,0,0,1-.707-1.707L15.586,12,6.293,2.707A1,1,0,0,1,7.707,1.293l10,10a1,1,0,0,1,0,1.414l-10,10A1,1,0,0,1,7,23Z"
     );
     svg.append(path2);
-    button.append(svg);
-    return button;
+    button2.append(svg);
+    return button2;
   }
   function gameCard(entry, userId, styles = nativeStyles(), showDate = true) {
-    const c = styles.resolve, duel = entry.duel;
+    const c = styles.module(historyItem), duel = entry.duel;
     const ratings = new Map(
       duel.teams?.flatMap((team2) => team2.players.map((player) => [player.playerId, player]))
     );
@@ -2083,70 +2150,30 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
       rating: ratings.get(player.id)?.rankedSystemRating ?? player.rating,
       tier: ratings.get(player.id)?.tier ?? player.tier
     }));
-    const item = element("div", c("game-history-list-item_item__rRU_J"));
-    const result = !duel.winnerId ? [] : [
-      duel.winnerId === userId ? "game-history-list-item_primaryUserWon__RmuIy" : "game-history-list-item_opponentWon__vX27C"
-    ];
-    const card = element("div", c("game-history-list-item_card__4tf1Q", ...result));
-    const data = element("div", c("game-history-list-item_gameData__etu0v"));
-    const left = element(
-      "div",
-      c(
-        "game-history-list-item_gameDataSide__WonRL",
-        "game-history-list-item_gameDataSideLeft__PvVLQ"
-      )
-    );
-    const right = element(
-      "div",
-      c(
-        "game-history-list-item_gameDataSide__WonRL",
-        "game-history-list-item_gameDataSideRight__6KUOb"
-      )
-    );
-    const center = element("div", c("game-history-list-item_centerColumn__OcNCH"));
-    center.append(
-      element(
-        "span",
-        c("game-history-list-item_mode__DhY8T"),
-        modeNames[duel.gameMode ?? ""] ?? duel.gameMode ?? "Duels"
-      ),
-      element("div", c("game-history-list-item_vs__0Dtj2"), "VS")
-    );
+    const outcome = !duel.winnerId ? "tie" : duel.winnerId === userId ? "primaryUserWon" : "opponentWon";
+    const item = node("div", c.cls("item", "link"), "item");
+    const card = node("div", c.cls("card", outcome), `card bgh-${outcome}`);
+    const data = node("div", c.cls("gameData"), "game-data");
+    const left = node("div", c.cls("gameDataSide", "gameDataSideLeft"), "side");
+    const right = node("div", c.cls("gameDataSide", "gameDataSideRight"), "side");
+    const center = node("div", c.cls("centerColumn"), "center");
+    const mode = modeNames[duel.gameMode ?? ""];
+    if (mode) center.append(node("span", c.cls("mode"), "mode", mode));
+    center.append(node("div", c.cls("vs"), "vs", "VS"));
     if (players[0])
       left.append(
         playerColumn(players[0], "left", duel.winnerId, styles),
-        avatar(players[0], styles)
+        avatar2(players[0], styles)
       );
     for (const player of players.slice(1))
-      right.append(avatar(player, styles), playerColumn(player, "right", duel.winnerId, styles));
+      right.append(avatar2(player, styles), playerColumn(player, "right", duel.winnerId, styles));
     data.append(left, center, right);
-    const actions = element("div", c("game-history-actions_actions__Y626Q"));
-    for (const view of ["replay", "summary"]) {
-      const tooltip = element("span", c("tooltip_reference___tWvM"));
-      const action = link(
-        "",
-        duelPath(entry.gameId, view),
-        c("link_anchor__TGl1_", "game-history-actions_actionBtn__u4zj2")
-      );
-      action.title = view === "replay" ? "Replay" : "Summary";
-      action.setAttribute("aria-label", action.title);
-      const icon = image(
-        assets[view],
-        c("game-history-actions_actionIcon__ohM8d"),
-        view === "replay" ? 22 : 24,
-        view === "replay" ? 22 : 24
-      );
-      icon.alt = view;
-      action.append(icon);
-      tooltip.append(action);
-      actions.append(tooltip);
-    }
     const date = duel.rounds?.[0]?.startTime;
     if (date && Number.isFinite(Date.parse(date))) {
       const when = new Date(date);
       item.title = when.toLocaleString();
       if (showDate) {
-        const dateSlot = element("span", c("game-history-list-item_date__G_uNE"));
+        const dateSlot = node("span", c.cls("date"), "date");
         const text = element(
           "span",
           "",
@@ -2157,44 +2184,64 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
         center.append(dateSlot);
       }
     }
-    card.append(data, actions);
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("class", `${c.cls("arrow")} bgh-card-arrow`.trim());
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("fill", "none");
+    icon.setAttribute("stroke", "currentColor");
+    icon.setAttribute("stroke-width", "2");
+    icon.setAttribute("stroke-linecap", "round");
+    icon.setAttribute("stroke-linejoin", "round");
+    icon.setAttribute("aria-hidden", "true");
+    const line = document.createElementNS(icon.namespaceURI, "line");
+    for (const [key, value] of Object.entries({ x1: "4", y1: "12", x2: "20", y2: "12" }))
+      line.setAttribute(key, value);
+    const head = document.createElementNS(icon.namespaceURI, "polyline");
+    head.setAttribute("points", "13 5 20 12 13 19");
+    icon.append(line, head);
+    const overlay = link(
+      "",
+      duelPath(entry.gameId, "summary"),
+      `${c.cls("cardOverlay")} bgh-overlay`
+    );
+    overlay.setAttribute("aria-label", "Game analysis");
+    card.append(data, icon, overlay);
     item.append(card);
     return item;
   }
+  function nickClasses() {
+    const wrapper = document.querySelector('[data-qa="user-card-title"] h1 > div');
+    return {
+      wrapper: wrapper?.className ?? "",
+      nick: wrapper?.querySelector(":scope > span, :scope > a")?.className ?? "",
+      flag: wrapper?.querySelector(":scope > img[title]")?.getAttribute("class") ?? ""
+    };
+  }
   function playerColumn(player, side, winnerId, styles) {
-    const c = styles.resolve;
-    const column = element(
-      "div",
-      c(
-        side === "left" ? "game-history-player-column_left__cXQn4" : "game-history-player-column_right__vW2fr"
+    const c = styles.module(historyPlayer), names = styles.module(historyNick), template = nickClasses();
+    const column = node("div", c.cls(side), side);
+    const result = !winnerId ? "tie" : player.id === winnerId ? "victory" : "defeat";
+    column.append(
+      node(
+        "span",
+        c.cls(result),
+        result,
+        { tie: "DRAW", victory: "VICTORY!", defeat: "DEFEAT!" }[result]
       )
     );
-    if (winnerId)
-      column.append(
-        element(
-          "span",
-          c(
-            player.id === winnerId ? "game-history-player-column_victory__PkWR6" : "game-history-player-column_defeat__Zv4p5"
-          ),
-          player.id === winnerId ? "VICTORY!" : "DEFEAT!"
-        )
-      );
-    const nick = element("div", c("ellipsed-user-nick_root__8MmmI"));
-    const identity = element(
-      "div",
-      c("player-nick_wrapper__WjkG6", "ellipsed-user-nick_identity__YFhgt")
-    );
+    const nick = element("div", names.cls("root"));
+    const identity = node("div", `${template.wrapper} ${names.cls("identity")}`.trim(), "identity");
     identity.append(
       link(
         player.nick || "Unknown",
         `/user/${encodeURIComponent(player.id)}`,
-        c("link_anchor__TGl1_", "nick_nick__THesc", "ellipsed-user-nick_nick__WF5w5")
+        `${template.nick} ${names.cls("nick")} bgh-nick`.trim()
       )
     );
     if (player.countryCode && /^[a-z]{2}$/i.test(player.countryCode)) {
       const flag = image(
         `https://flagcdn.com/w40/${player.countryCode.toLowerCase()}.png`,
-        c("flag_flag__Fsx7Z", "player-nick_flag__yQWK5"),
+        template.flag,
         21,
         15
       );
@@ -2202,34 +2249,33 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
       identity.append(flag);
     }
     nick.append(identity);
-    const rating = element("div", c("game-history-player-column_rating__mqEKT"));
-    rating.append(
-      element("span", c("game-history-player-column_ratingLabel____9TC"), "Rating"),
-      ` ${player.rating ?? "\u2014"}`
-    );
+    const rating = node("div", c.cls("rating"), "rating");
+    if (player.rating !== void 0)
+      rating.append(
+        node("span", c.cls("ratingLabel"), "rating-label", "Rating"),
+        ` ${player.rating}`
+      );
     column.append(nick, rating);
     return column;
   }
-  function avatar(player, styles) {
-    const c = styles.resolve;
-    const cell = element("div", c("game-history-list-item_avatarCell__Z1U6s"));
-    const title = element("div", c("avatar_titleAvatar__JsMrO"));
-    const img = element("div", c("avatar_titleAvatarImage__sXIP7"));
+  function avatar2(player, styles) {
+    const c = styles.module(avatar);
+    const cell = node("div", styles.module(historyItem).cls("avatarCell"), "avatar-cell");
+    const title = node("div", c.cls("titleAvatar"), "avatar");
+    const img = node("div", c.cls("titleAvatarImage"), "avatar-image");
     if (player.pin?.url) {
       const portrait = image(
-        `/images/resize:auto:48:48/gravity:ce/plain/${player.pin.url}`,
-        c("styles_image__3rHlb")
+        `/images/resize:fit:96:0/gravity:ce/plain/${player.pin.url}`,
+        c.cls("image")
       );
-      portrait.style.cssText = "position:absolute;width:100%;inset:0;object-fit:cover;color:transparent";
       portrait.loading = "eager";
       portrait.decoding = "async";
       img.append(portrait);
     }
     const border = image(
       `/static/avatars/tiers/low-quality/tier-${Number.isFinite(player.tier) ? player.tier : 100}.webp`,
-      c("avatar_titleAvatarBorder__QmnOl")
+      `${c.cls("titleAvatarBorder", "titleAvatarBorderImage")} bgh-avatar-border`.trim()
     );
-    border.style.cssText = "position:absolute;height:100%;width:100%;inset:0;color:transparent";
     border.decoding = "async";
     title.append(img, border);
     cell.append(title);
@@ -2248,72 +2294,54 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
 
   // src/features/match-history-dialog.ts
   function openHistoryDialog(initial, userId, onClose) {
-    const scope = new Scope(), styles = nativeStyles(), c = styles.resolve;
+    const scope = new Scope(), styles = nativeStyles();
+    const layout2 = styles.module(layout), portalStyles = styles.module(overlayPortal), modal = styles.module(overlayModal), history = styles.module(historyModal), list_ = styles.module(historyList), picker = styles.module(select);
     const focused = document.activeElement;
     const dialog = element("dialog", "bettergeo-duels");
     dialog.setAttribute("aria-label", "Recent games");
-    if (!styles.has("game-history-modal_root__"))
-      dialog.classList.add("bettergeo-history-modal-fallback");
-    if (!styles.has("game-history-list-item_card__"))
-      dialog.classList.add("bettergeo-history-fallback");
-    const overlay = element("div", c("version4_fullOverlay__IQxsi"));
-    const portal = element("div", c("overlay-portal_destination__ghrwd"));
+    if (!history.styled || !modal.styled) dialog.classList.add("bettergeo-history-modal-fallback");
+    if (!styles.module(historyItem).styled) dialog.classList.add("bettergeo-history-fallback");
+    const overlay = element("div", `${layout2.cls("fullOverlay")} bgh-overlay-root`.trim());
+    const portal = element("div", portalStyles.cls("destination"));
     const backlight = element(
       "div",
-      c(
-        "overlay-modal_backlight__RpQao",
-        "overlay-modal_backlightDark__TqpAA",
-        "overlay-modal_isAnimated__qxbgD",
-        "overlay-modal_blurBackground__9_zFe"
-      )
+      `${modal.cls("backlight", "backlightDark", "isAnimated", "blurBackground")} bgh-backlight`.trim()
     );
     const container = element(
       "div",
-      c(
-        "overlay-modal_contentContainer___KC3A",
-        "overlay-modal_alignVerticallyCenter__oydwB",
-        "overlay-modal_isAnimated__qxbgD"
-      )
+      `${modal.cls("contentContainer", "alignVerticallyCenter", "isAnimated")} bgh-modal-container`.trim()
     );
     const content = element(
       "div",
-      c(
-        "overlay-modal_content__d7Vy6",
-        "overlay-modal_sizeLarge__oBI4H",
-        "overlay-modal_fullHeight__wQygj"
-      )
+      `${modal.cls("content", "sizeLarge", "fullHeight")} bgh-modal-content`.trim()
     );
-    const root = element("div", c("game-history-modal_root__TZJqh"));
-    const header = element("div", c("game-history-modal_divisionHeader__ELL4_"));
-    const ranked = [...document.querySelectorAll("h2")].find((h) => /^ranked duels$/i.test(h.textContent?.trim() ?? ""))?.closest('[class*="widget_root__"]');
+    const root = element("div", history.cls("root"));
+    const header = element("div", `${history.cls("divisionHeader")} bgh-division`.trim());
+    const ranked = [...document.querySelectorAll("h2")].find((h) => /^ranked duels$/i.test(h.textContent?.trim() ?? ""))?.closest(nativeSelector(widget, "root"));
     const division = [...ranked?.querySelectorAll("img") ?? []].find(
       (img) => /champion|master|gold|silver|bronze/i.test(img.src)
     );
     const icon = division ? division.cloneNode(false) : element("img");
-    if (!division)
-      icon.src = "/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fgamemode-duels.f0444913.webp&w=640&q=75";
+    if (!division) icon.src = images.rankedDuels;
     icon.removeAttribute("id");
     icon.removeAttribute("class");
     icon.removeAttribute("style");
+    icon.removeAttribute("srcset");
     icon.alt = "";
     icon.width = 600;
     icon.height = 600;
     header.append(
       icon,
-      element("p", c("game-history-modal_divisionHeaderText__BeuNw"), "Recent games")
+      element("p", `${history.cls("divisionHeaderText")} bgh-division-text`.trim(), "Recent games")
     );
-    const dropdownContainer = element("div", c("game-history-modal_dropdownContainer__aYYv3"));
-    const dropdownSlot = element("div", c("game-history-modal_dropdown__tSpru"));
-    const dropdown = element(
+    const dropdownContainer = element(
       "div",
-      c(
-        "dropdown_dropdown__GxB04",
-        "dropdown_variantLightTransparent__YBisN",
-        "dropdown_sizeDefault__nhnvm"
-      )
+      `${history.cls("dropdownContainer")} bgh-dropdown-container`.trim()
     );
-    const select = element("select", c("dropdown_select__WtHWX"));
-    select.setAttribute("aria-label", "Game mode");
+    const dropdownSlot = element("div", history.cls("dropdown"));
+    const dropdown = element("div", picker.cls("dropdown", "variantLightTransparent", "sizeDefault"));
+    const select2 = element("select", `${picker.cls("select")} bgh-select`.trim());
+    select2.setAttribute("aria-label", "Game mode");
     for (const [value, label] of [
       ["None", "All"],
       ["StandardDuels", "Moving"],
@@ -2322,17 +2350,17 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     ]) {
       const option = element("option", "", label);
       option.value = value;
-      select.append(option);
+      select2.append(option);
     }
-    dropdown.append(select, element("div", c("dropdown_arrow__9Wc4k")));
+    dropdown.append(select2, element("div", picker.cls("arrow")));
     dropdownSlot.append(dropdown);
     dropdownContainer.append(dropdownSlot);
-    const spacer = element("div", c("spacer_space__R4G0s", "spacer_height__ovvoK"));
-    spacer.style.setProperty("--height", "32");
-    const leaderboard = element("div", c("game-history-modal_leaderboardWrapper__p3_RH"));
-    const listRoot = element("div", c("game-history-list_root__QvVPL"));
-    const listContainer = element("div", c("game-history-list_leaderboardContainer__FnLO5"));
-    const list = element("div", c("game-history-list_list__T_e20"));
+    const spacer2 = element("div", styles.module(spacer).cls("space", "height"));
+    spacer2.style.setProperty("--height", "32");
+    const leaderboard = element("div", history.cls("leaderboardWrapper"));
+    const listRoot = element("div", list_.cls("root"));
+    const listContainer = element("div", list_.cls("leaderboardContainer"));
+    const list = element("div", list_.cls("list"));
     list.classList.add("bettergeo-duel-list");
     const status = element("p", "bettergeo-history-status");
     status.setAttribute("role", "status");
@@ -2343,14 +2371,14 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     root.append(
       header,
       dropdownContainer,
-      spacer,
-      element("div", c("game-history-modal_separator__gP85P")),
+      spacer2,
+      element("div", `${history.cls("separator")} bgh-separator`.trim()),
       leaderboard
     );
     content.append(root);
     const close = element(
       "button",
-      c("overlay-modal_closeButton__8QTzI", "overlay-modal_closeButtonWhite__2Ozdd")
+      `${modal.cls("closeButton", "closeButtonWhite")} bgh-close`.trim()
     );
     close.type = "button";
     close.name = "close";
@@ -2370,7 +2398,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     overlay.append(portal);
     dialog.append(overlay);
     function render() {
-      const mode = select.value;
+      const mode = select2.value;
       list.replaceChildren(
         ...initial.filter(
           (entry) => entry.duel && Array.isArray(entry.players) && (mode === "None" || entry.duel.gameMode === mode)
@@ -2395,7 +2423,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     });
     content.style.overscrollBehavior = "contain";
     leaderboard.style.overscrollBehavior = "contain";
-    scope.listen(select, "change", render);
+    scope.listen(select2, "change", render);
     function finish() {
       if (!scope.active) return;
       scope.dispose();
@@ -2423,7 +2451,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
     name: "Unhide recent duels",
     description: "Restore the Recent Duels panel when a player has hidden it on their profile.",
     enable({ api: api2, events: events2 }, scope) {
-      let widget, closeModal;
+      let widget2, closeModal;
       const style = element("style");
       style.textContent = CSS4;
       scope.own(() => style.remove());
@@ -2441,8 +2469,8 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
             (heading) => !heading.closest(`#${widgetId}`) && /recent duels/i.test(heading.textContent ?? "")
           );
           if (native) {
-            widget?.remove();
-            widget = void 0;
+            widget2?.remove();
+            widget2 = void 0;
             closeModal?.();
             return null;
           }
@@ -2450,23 +2478,23 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
         },
         load: (id) => api2.history(id),
         reset() {
-          widget?.remove();
-          widget = void 0;
+          widget2?.remove();
+          widget2 = void 0;
           closeModal?.();
         },
         render(data, id, container) {
-          if (widget?.isConnected) {
-            if (!widget.classList.contains("bettergeo-history-fallback") || !nativeStyles().has("game-history-list-item_card__"))
+          if (widget2?.isConnected) {
+            if (!widget2.classList.contains("bettergeo-history-fallback") || !nativeStyles().module(historyItem).styled)
               return;
-            widget.remove();
+            widget2.remove();
           }
           const entries = data.entries.filter((entry) => entry.duel);
           if (!entries.length) return;
           if (!style.isConnected) document.head.append(style);
-          widget = historyView(entries, id, () => showAll(entries, id));
-          const firstRow = container.querySelector('[class*="profile-v2_widgetRow__"]');
-          if (firstRow) firstRow.after(widget);
-          else container.prepend(widget);
+          widget2 = historyView(entries, id, () => showAll(entries, id));
+          const firstRow = container.querySelector(nativeSelector(profile, "widgetRow"));
+          if (firstRow) firstRow.after(widget2);
+          else container.prepend(widget2);
         }
       });
     }
@@ -2511,18 +2539,19 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
   text-align: center;
   padding: 20px;
 }
-/* Fallback shell for profiles where GeoGuessr has not loaded the native modal CSS. */
-.bettergeo-history-modal-fallback > [class*='version4_fullOverlay__'] {
+/* Fallback shell for when GeoGuessr has not loaded the native modal CSS. Targets only
+   BetterGEO's own bgh-* hooks, so it keeps working whatever GeoGuessr names its classes. */
+.bettergeo-history-modal-fallback .bgh-overlay-root {
   position: fixed;
   inset: 0;
 }
-.bettergeo-history-modal-fallback [class*='overlay-modal_backlight__'] {
+.bettergeo-history-modal-fallback .bgh-backlight {
   position: absolute;
   inset: 0;
   background: #000b;
   backdrop-filter: blur(4px);
 }
-.bettergeo-history-modal-fallback [class*='overlay-modal_contentContainer__'] {
+.bettergeo-history-modal-fallback .bgh-modal-container {
   position: absolute;
   inset: 0;
   display: flex;
@@ -2530,48 +2559,43 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
   align-items: center;
   padding: 24px;
 }
-.bettergeo-history-modal-fallback [class*='overlay-modal_content__'] {
+.bettergeo-history-modal-fallback .bgh-modal-content {
   width: min(860px, 94vw);
   height: 90vh;
   background: #242044;
   border-radius: 12px;
   overflow: auto;
 }
-.bettergeo-history-modal-fallback
-  [class*='game-history-modal_divisionHeader__'] {
+.bettergeo-history-modal-fallback .bgh-division {
   text-align: center;
   padding: 16px;
 }
-.bettergeo-history-modal-fallback
-  [class*='game-history-modal_divisionHeader__']
-  img {
+.bettergeo-history-modal-fallback .bgh-division img {
   width: 100px;
   height: 100px;
   object-fit: contain;
 }
-.bettergeo-history-modal-fallback
-  [class*='game-history-modal_divisionHeaderText__'] {
+.bettergeo-history-modal-fallback .bgh-division-text {
   font-size: 24px;
   font-weight: 700;
   font-style: italic;
   margin: 0;
 }
-.bettergeo-history-modal-fallback
-  [class*='game-history-modal_dropdownContainer__'] {
+.bettergeo-history-modal-fallback .bgh-dropdown-container {
   display: flex;
   justify-content: center;
 }
-.bettergeo-history-modal-fallback [class*='dropdown_select__'] {
+.bettergeo-history-modal-fallback .bgh-select {
   padding: 8px 28px 8px 12px;
   background: #ffffff18;
   color: white;
   border: 1px solid #ffffff30;
   border-radius: 4px;
 }
-.bettergeo-history-modal-fallback [class*='dropdown_select__'] option {
+.bettergeo-history-modal-fallback .bgh-select option {
   color: #171426;
 }
-.bettergeo-history-modal-fallback [class*='game-history-modal_separator__'] {
+.bettergeo-history-modal-fallback .bgh-separator {
   border-top: 1px solid #ffffff20;
   margin: 24px 0;
 }
@@ -2580,7 +2604,7 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
   gap: 12px;
   padding: 16px;
 }
-.bettergeo-history-modal-fallback [class*='overlay-modal_closeButton__'] {
+.bettergeo-history-modal-fallback .bgh-close {
   position: absolute;
   right: 24px;
   top: 24px;
@@ -2592,52 +2616,13 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
   height: 32px;
   cursor: pointer;
 }
-.bettergeo-history-modal-fallback [class*='overlay-modal_closeButton__'] svg {
+.bettergeo-history-modal-fallback .bgh-close svg {
   width: 24px;
   height: 24px;
   fill: currentColor;
 }
-/* Profiles may not load the native history CSS chunk. These scoped rules preserve
-   the same mirrored layout until those styles are available. */
-.bettergeo-history-fallback [class*='widget_root__'] {
-  width: 100%;
-  color: white;
-}
-.bettergeo-history-fallback [class*='widget_widgetBorder__'] {
-  border: 1px solid #ffffff20;
-  border-radius: 12px;
-  background: #ffffff08;
-  overflow: hidden;
-}
-.bettergeo-history-fallback [class*='widget_header___'] {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  gap: 12px;
-}
-.bettergeo-history-fallback
-  [class*='widget_title__']
-  > [class*='widget_header__'] {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.bettergeo-history-fallback [class*='widget_icon__'] {
-  width: 56px;
-  height: 56px;
-  object-fit: contain;
-}
-.bettergeo-history-fallback [class*='headline_heading__'] {
-  font-size: 16px;
-  font-weight: 700;
-  font-style: italic;
-  margin: 0;
-}
-.bettergeo-history-fallback [class*='widget_dividerWrapper__'] {
-  border-top: 1px solid #ffffff18;
-}
-.bettergeo-history-fallback [class*='button_button__'] {
+/* Fallback card layout for when the native game-history CSS chunk is not loaded. */
+.bettergeo-history-fallback .bgh-button {
   border: 1px solid #ffffff40;
   border-radius: 24px;
   background: transparent;
@@ -2647,110 +2632,117 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
   font-weight: 600;
   cursor: pointer;
 }
-.bettergeo-history-fallback [class*='carousel_carouselContainer__'] {
+.bettergeo-history-fallback .bgh-carousel {
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr) 24px;
   align-items: center;
   gap: 8px;
   padding: 16px 8px 12px;
 }
-.bettergeo-history-fallback [class*='carousel_carouselWrapper__'] {
+.bettergeo-history-fallback .bgh-carousel-wrapper {
   min-width: 0;
 }
-.bettergeo-history-fallback [class*='carousel_arrowButton__'] {
+.bettergeo-history-fallback .bgh-arrow-button {
   background: none;
   border: 0;
   color: white;
   cursor: pointer;
   padding: 4px;
 }
-.bettergeo-history-fallback [class*='carousel_arrowSvg__'] {
+.bettergeo-history-fallback .bgh-arrow-svg {
   width: 16px;
   height: 24px;
   fill: currentColor;
 }
-.bettergeo-history-fallback [class*='carousel_indicatorWrapper__'] {
+.bettergeo-history-fallback .bgh-indicators {
   grid-column: 1/-1;
   display: flex;
   justify-content: center;
   gap: 8px;
   padding-top: 8px;
 }
-.bettergeo-history-fallback [class*='carousel_indicator__'] {
+.bettergeo-history-fallback .bgh-indicator {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   opacity: 0.4;
 }
-.bettergeo-history-fallback [class*='carousel_green__'] {
+.bettergeo-history-fallback .bgh-green {
   background: #6cb928;
 }
-.bettergeo-history-fallback [class*='carousel_red__'] {
+.bettergeo-history-fallback .bgh-red {
   background: #c42424;
 }
-.bettergeo-history-fallback [class*='carousel_active__'] {
+.bettergeo-history-fallback .bgh-indicator.bgh-active {
   opacity: 1;
   outline: 1px solid #fff;
   outline-offset: 2px;
 }
-.bettergeo-history-fallback [class*='game-history-list-item_card__'] {
+.bettergeo-history-fallback .bgh-card {
   position: relative;
   border: 1px solid #ffffff30;
   border-radius: 8px;
   padding: 20px 46px 20px 16px;
   color: white;
 }
-.bettergeo-history-fallback [class*='game-history-list-item_primaryUserWon__'] {
+.bettergeo-history-fallback .bgh-primaryUserWon {
   background: linear-gradient(135deg, #6cb92830, #6cb92815);
   border-color: #6cb92866;
 }
-.bettergeo-history-fallback [class*='game-history-list-item_opponentWon__'] {
+.bettergeo-history-fallback .bgh-opponentWon {
   background: linear-gradient(135deg, #c4242430, #c4242415);
   border-color: #c4242466;
 }
-.bettergeo-history-fallback [class*='game-history-list-item_gameData__'] {
+.bettergeo-history-fallback .bgh-game-data {
   display: flex;
   justify-content: center;
   align-items: center;
   gap: 16px;
 }
-.bettergeo-history-fallback [class*='game-history-list-item_gameDataSide__'] {
+.bettergeo-history-fallback .bgh-side {
   display: flex;
   align-items: center;
   gap: 12px;
   min-width: 0;
 }
-.bettergeo-history-fallback [class*='game-history-player-column_left__'],
-.bettergeo-history-fallback [class*='game-history-player-column_right__'] {
+.bettergeo-history-fallback .bgh-left,
+.bettergeo-history-fallback .bgh-right {
   display: flex;
   flex-direction: column;
   gap: 4px;
   min-width: 0;
 }
-.bettergeo-history-fallback [class*='game-history-player-column_left__'] {
+.bettergeo-history-fallback .bgh-left {
   align-items: flex-end;
   text-align: right;
 }
-.bettergeo-history-fallback [class*='game-history-player-column_right__'] {
+.bettergeo-history-fallback .bgh-right {
   align-items: flex-start;
 }
-.bettergeo-history-fallback [class*='game-history-player-column_victory__'] {
+.bettergeo-history-fallback .bgh-victory,
+.bettergeo-history-fallback .bgh-defeat,
+.bettergeo-history-fallback .bgh-tie {
+  font-size: 11px;
+  font-weight: 700;
+}
+.bettergeo-history-fallback .bgh-victory {
   color: #6cb928;
-  font-size: 11px;
-  font-weight: 700;
 }
-.bettergeo-history-fallback [class*='game-history-player-column_defeat__'] {
+.bettergeo-history-fallback .bgh-defeat {
   color: #e44747;
-  font-size: 11px;
-  font-weight: 700;
 }
-.bettergeo-history-fallback [class*='player-nick_wrapper__'] {
+.bettergeo-history-fallback .bgh-identity {
   display: flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
 }
-.bettergeo-history-fallback [class*='nick_nick__'] {
+.bettergeo-history-fallback .bgh-identity a,
+.bettergeo-history-fallback .bgh-button {
+  position: relative;
+  z-index: 1;
+}
+.bettergeo-history-fallback .bgh-nick {
   color: white;
   text-decoration: none;
   font-weight: 600;
@@ -2759,705 +2751,84 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.bettergeo-history-fallback [class*='game-history-player-column_rating__'] {
+.bettergeo-history-fallback .bgh-rating {
   font-size: 11px;
   color: #ffffff99;
 }
-.bettergeo-history-fallback
-  [class*='game-history-player-column_ratingLabel__'] {
+.bettergeo-history-fallback .bgh-rating-label {
   color: #ffffff66;
 }
-.bettergeo-history-fallback [class*='game-history-list-item_avatarCell__'] {
+.bettergeo-history-fallback .bgh-avatar-cell {
   flex-shrink: 0;
 }
-.bettergeo-history-fallback [class*='avatar_titleAvatar__'] {
+.bettergeo-history-fallback .bgh-avatar {
   position: relative;
   display: grid;
   place-items: center;
   width: 52px;
   height: 52px;
 }
-.bettergeo-history-fallback [class*='avatar_titleAvatarImage__'] img {
+.bettergeo-history-fallback .bgh-avatar-image img {
   width: 36px;
   height: 36px;
   border-radius: 50%;
   object-fit: cover;
 }
-.bettergeo-history-fallback [class*='avatar_titleAvatarBorder__'] {
+.bettergeo-history-fallback .bgh-avatar-border {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   pointer-events: none;
 }
-.bettergeo-history-fallback [class*='game-history-list-item_centerColumn__'] {
+.bettergeo-history-fallback .bgh-center {
   display: flex;
   align-items: center;
   flex-direction: column;
   gap: 4px;
   flex-shrink: 0;
 }
-.bettergeo-history-fallback [class*='game-history-list-item_mode__'] {
+.bettergeo-history-fallback .bgh-mode {
   font-size: 11px;
   color: #ffffff99;
   font-weight: 600;
 }
-.bettergeo-history-fallback [class*='game-history-list-item_vs__'] {
+.bettergeo-history-fallback .bgh-vs {
   font-size: 14px;
   font-weight: 700;
   color: #ffffff66;
 }
-.bettergeo-history-fallback [class*='game-history-actions_actions__'] {
+.bettergeo-history-fallback .bgh-card-arrow {
   position: absolute;
-  right: 12px;
+  right: 14px;
   top: 50%;
+  width: 20px;
+  height: 20px;
   transform: translateY(-50%);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  opacity: 0.7;
 }
-.bettergeo-history-fallback [class*='game-history-actions_actionBtn__'] {
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
-  background: #ffffff12;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.bettergeo-history-fallback .bgh-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
 }
 @media (max-width: 600px) {
-  .bettergeo-history-fallback [class*='game-history-list-item_gameData__'] {
+  .bettergeo-history-fallback .bgh-game-data {
     gap: 6px;
   }
-  .bettergeo-history-fallback [class*='game-history-list-item_gameDataSide__'] {
+  .bettergeo-history-fallback .bgh-side {
     gap: 4px;
     flex-wrap: wrap;
     justify-content: center;
   }
-  .bettergeo-history-fallback [class*='nick_nick__'] {
+  .bettergeo-history-fallback .bgh-nick {
     max-width: 72px;
   }
-  .bettergeo-history-fallback [class*='game-history-list-item_card__'] {
+  .bettergeo-history-fallback .bgh-card {
     padding: 12px 36px 12px 6px;
   }
 }
 `;
-
-  // src/features/race-badge.ts
-  function refreshRaceBadge(badge, player) {
-    const projection = player.projection;
-    const position = projection?.position ?? player.position;
-    const stale = projection && (projection.stale || !projection.completed && Date.now() - projection.updatedAt > 10 * 6e4);
-    const text = `${player.region}${position === void 0 ? "" : ` #${position}`}`;
-    const title = [
-      player.name.toLowerCase().includes(player.region.toLowerCase()) ? player.name : `${player.name} \xB7 ${player.region}`,
-      ...projection ? [
-        ...projection.waitingForWeek ? ["Waiting for this week\u2019s leaderboard; showing the previous week."] : [],
-        ...stale ? ["Update delayed: these projections are based on an older snapshot."] : [],
-        `Projected regional position: #${projection.position} (unofficial)`,
-        projection.completed ? `Completed week ${projection.weekIndex + 1} snapshot; requires at least 10 ranked games.` : `If week ${projection.weekIndex + 1} ended now; requires at least 10 ranked games in that week.`,
-        `Projected total: ${projection.total} points`
-      ] : ["Official standings (projection unavailable)."],
-      player.position === void 0 ? "" : `Official regional position: #${player.position}`,
-      player.total === void 0 ? "" : `Total: ${player.total} points (official)`,
-      ...player.points.slice(0, projection ? projection.weekIndex : player.points.length).map((points, index) => `Week ${index + 1}: ${points} points (official)`),
-      ...projection ? [
-        `Week ${projection.weekIndex + 1}: ${projection.weekPoints} points (${projection.completed ? "completed snapshot" : "projected"}) \xB7 Games played: ${projection.gamesWeek}`,
-        `Projection updated: ${new Date(projection.updatedAt).toLocaleString()}`,
-        `Source: elorace \xB7 ${raceTrackerUrl}`
-      ] : []
-    ].filter(Boolean).join("\n");
-    if (badge.textContent !== text) badge.textContent = text;
-    if (badge.dataset.region !== player.region) badge.dataset.region = player.region;
-    const source = projection ? "projection" : "official";
-    if (badge.dataset.source !== source) badge.dataset.source = source;
-    if (badge.title !== title) badge.title = title;
-    if (badge.getAttribute("aria-label") !== title) badge.setAttribute("aria-label", title);
-  }
-
-  // src/features/race-player.ts
-  function racePlayer(id, player, c, nativeBoard) {
-    const nativeLink = nativeBoard?.querySelector(`a[href$="/user/${id}"]`);
-    const nativeIdentity = nativeLink?.closest('[class*="player-nick_wrapper__"]');
-    const identity = nativeIdentity ? nativeIdentity.cloneNode(true) : element("div", c("player-nick_wrapper__WjkG6", "global-leaderboard-row_player__5R_nz"));
-    identity.querySelectorAll(".bettergeo-online-race").forEach((badge2) => badge2.remove());
-    identity.removeAttribute("id");
-    for (const node of identity.querySelectorAll("[id], [aria-describedby]")) {
-      node.removeAttribute("id");
-      node.removeAttribute("aria-describedby");
-    }
-    if (!nativeIdentity) {
-      if (player.avatar) {
-        const avatar2 = element(
-          "div",
-          c("legacy-avatar_avatar__Cyqz8", "global-leaderboard-row_avatar__F93eb")
-        );
-        const circle = element(
-          "div",
-          c(
-            "styles_circle__xzz4g",
-            "styles_variantFloating__EERDe",
-            "styles_colorWhite__JDJEH",
-            "styles_borderColorWhite__VsTBL",
-            "styles_borderSizeFactorHalf__XbkiO"
-          )
-        );
-        const rectangle = element("div", c("styles_rectangle__864ZT"));
-        rectangle.style.paddingTop = "100%";
-        const inner = element("div", c("styles_innerCircle__QspyH"));
-        const content = element("div", c("styles_content__hkoJ_"));
-        const image2 = element("img", c("styles_image__3rHlb"));
-        image2.src = `/images/resize:auto:48:48/gravity:ce/plain/${player.avatar}`;
-        image2.alt = "";
-        image2.loading = "lazy";
-        image2.draggable = false;
-        image2.style.cssText = "position:absolute;width:100%;height:100%;inset:0;object-fit:cover";
-        content.append(image2);
-        inner.append(content);
-        rectangle.append(inner);
-        circle.append(rectangle);
-        avatar2.append(circle);
-        identity.append(avatar2);
-      }
-      if (player.countryCode) {
-        const flag = element("img", c("flag_flag__Fsx7Z", "player-nick_flag__yQWK5"));
-        flag.src = `https://flagcdn.com/w40/${player.countryCode}.png`;
-        flag.alt = "";
-        flag.title = countryName(player.countryCode);
-        flag.loading = "lazy";
-        flag.draggable = false;
-        identity.append(flag);
-      }
-      identity.append(
-        link(
-          player.nick,
-          `/user/${id}`,
-          c("link_anchor__TGl1_", "nick_nick__THesc", "global-leaderboard-row_nick__3FxXj")
-        )
-      );
-    }
-    const badge = element("span", "bettergeo-online-race");
-    refreshRaceBadge(badge, player);
-    badge.tabIndex = 0;
-    identity.append(badge);
-    return identity;
-  }
-
-  // src/features/race-leaderboard.ts
-  function installRaceLeaderboard({ api: api2, events: events2 }, scope, acceptPlayers) {
-    let mounted;
-    const style = element("style");
-    style.textContent = CSS5;
-    scope.own(() => {
-      mounted?.scope.dispose();
-      style.remove();
-    });
-    scope.own(
-      events2.subscribe(() => {
-        const onDuels = /^\/(?:[a-z]{2}\/)?multiplayer\/duels\/?$/.test(location.pathname);
-        const tabs = onDuels ? document.querySelector('[class*="global-leaderboard_scopeTabs__"] [role="tablist"]') : null;
-        const shell = tabs?.closest('[class*="leaderboard-shell_shell__"]');
-        const content = shell?.querySelector('[class*="leaderboard-shell_content__"]');
-        if (mounted && (mounted.tabs !== tabs || mounted.shell !== shell || mounted.content !== content || !mounted.tabs.querySelector("[data-bettergeo-race-tab]"))) {
-          mounted.scope.dispose();
-          mounted = void 0;
-        }
-        if (!tabs || !shell || !content || mounted) return;
-        const template = tabs.querySelector('button[role="tab"]');
-        if (!template) return;
-        if (!style.isConnected) document.head.append(style);
-        const c = nativeStyles().resolve;
-        const cycle = new Scope();
-        mounted = { tabs, shell, content, scope: cycle };
-        const button = element("button", `${template.className} bettergeo-race-tab`, "ELO Race");
-        button.type = "button";
-        button.id = "bettergeo-race-tab";
-        button.dataset.bettergeoRaceTab = "";
-        button.setAttribute("role", "tab");
-        button.setAttribute("aria-selected", "false");
-        button.setAttribute("aria-controls", "bettergeo-race-panel");
-        const panel = element("section", "bettergeo-race-panel");
-        panel.id = "bettergeo-race-panel";
-        panel.setAttribute("role", "tabpanel");
-        panel.setAttribute("aria-labelledby", button.id);
-        panel.hidden = true;
-        const filters = element(
-          "div",
-          `${c("global-leaderboard_modeTabs__JMDtx")} bettergeo-race-filters`
-        );
-        filters.hidden = true;
-        const filterRoot = element("div", c("tabs_root__HXSCq"));
-        filterRoot.dataset.variant = "underline";
-        filterRoot.dataset.rounded = "default";
-        filterRoot.dataset.width = "auto";
-        const filterList = element("div", c("tabs_list__KrxZ4"));
-        const filterScroller = element("div", c("tabs_scroller__E54XO"));
-        filterScroller.setAttribute("role", "group");
-        filterScroller.setAttribute("aria-label", "Race region");
-        filterList.append(filterScroller);
-        filterRoot.append(filterList);
-        filters.append(filterRoot);
-        const status = element("p", "bettergeo-race-status");
-        status.setAttribute("role", "status");
-        const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-        icon.setAttribute("viewBox", "0 0 24 24");
-        icon.setAttribute("width", "14");
-        icon.setAttribute("height", "14");
-        icon.setAttribute("fill", "none");
-        icon.setAttribute("stroke", "currentColor");
-        icon.setAttribute("stroke-width", "2");
-        icon.setAttribute("aria-hidden", "true");
-        const updated = element("span", "bettergeo-race-updated");
-        updated.title = "Standings update every 5 minutes. The refresh button reloads the shared server cache.";
-        updated.tabIndex = 0;
-        const refresh = element("button", "bettergeo-race-refresh");
-        refresh.type = "button";
-        refresh.title = "Reload cached standings";
-        refresh.setAttribute("aria-label", "Reload race standings");
-        const refreshIcon = icon;
-        const arrow2 = document.createElementNS(icon.namespaceURI, "path");
-        arrow2.setAttribute(
-          "d",
-          "M20 7v5h-5M4 17v-5h5M6.1 6.1A8 8 0 0 1 19.5 9M4.5 15a8 8 0 0 0 13.4 2.9"
-        );
-        refreshIcon.append(arrow2);
-        refresh.append(refreshIcon);
-        const metadata = element("span", "bettergeo-race-metadata");
-        metadata.append(updated, refresh);
-        const retry = element("button", `${template.className} bettergeo-race-retry`, "Retry");
-        retry.type = "button";
-        retry.hidden = true;
-        const board = element(
-          "div",
-          `${c("global-leaderboard_leaderboard__mx2Iy")} bettergeo-race-board`
-        );
-        const headerTable = element(
-          "table",
-          `${c("global-leaderboard_table__6Y95Y")} bettergeo-race-table`
-        );
-        const columns = () => {
-          const group = element("colgroup");
-          for (const width of ["44px", "56px", "", "80px", "82px", "76px"]) {
-            const col = element("col");
-            if (width) col.style.width = width;
-            group.append(col);
-          }
-          return group;
-        };
-        headerTable.append(columns());
-        const head = element("thead");
-        const headers = element("tr");
-        const orderHeader = element("th", c("global-leaderboard_rankHead___zVjK"), "#");
-        orderHeader.scope = "col";
-        orderHeader.title = "Position in the current sort order";
-        headers.append(orderHeader);
-        for (const [label, className, key] of [
-          ["Proj.", "global-leaderboard_rankHead___zVjK", "projected"],
-          ["Name", "global-leaderboard_playerHead__l5F01", "name"],
-          ["Elo", "global-leaderboard_ratingHead__Q5Xbt", "elo"],
-          ["Proj. pts", "global-leaderboard_ratingHead__Q5Xbt", "total"],
-          ["Wk pts", "global-leaderboard_ratingHead__Q5Xbt", "week"]
-        ]) {
-          const th = element("th", c(className));
-          const sortButton = element("button", "bettergeo-race-sort-header", label);
-          sortButton.type = "button";
-          sortButton.dataset.bettergeoRaceSort = key;
-          cycle.listen(sortButton, "click", () => {
-            direction = sort === key ? -direction : key === "projected" || key === "name" ? 1 : -1;
-            sort = key;
-            render();
-          });
-          th.append(sortButton);
-          if (key === "elo") th.setAttribute("aria-sort", "descending");
-          if (label === "Proj.") th.title = "Projected regional position";
-          if (label === "Proj. pts")
-            th.title = "Projected total: official completed weeks plus the snapshot week";
-          if (label === "Wk pts")
-            th.title = "Projected points for the snapshot week; requires at least 10 games";
-          th.scope = "col";
-          if (label === "Name") th.append(metadata);
-          headers.append(th);
-        }
-        head.append(headers);
-        headerTable.append(head);
-        const table = element(
-          "table",
-          `${c("global-leaderboard_table__6Y95Y")} bettergeo-race-table`
-        );
-        const body = element("tbody");
-        table.append(columns(), body);
-        const results = element(
-          "div",
-          `${c("global-leaderboard_rows__OlmnP")} bettergeo-race-results`
-        );
-        results.append(table);
-        board.append(headerTable, results);
-        panel.append(status, retry, board);
-        tabs.append(button);
-        const nativeModeTabs = shell.querySelector('[class*="global-leaderboard_modeTabs__"]');
-        if (nativeModeTabs) nativeModeTabs.after(filters);
-        else tabs.parentElement.after(filters);
-        content.append(panel);
-        let active = false;
-        let region = "All";
-        let sort = "elo";
-        let direction = -1;
-        let snapshot;
-        let refreshFailed = false;
-        let request;
-        const nativeAttributes = /* @__PURE__ */ new Map();
-        const attributeNames = ["aria-selected", "data-state", "tabindex"];
-        function render() {
-          if (!snapshot) return;
-          const entries = [...snapshot.players].filter(
-            ([, player]) => region === "All" || player.region === region
-          );
-          const value = (player) => sort === "elo" ? player.rating : sort === "projected" ? player.projection?.position ?? player.position : sort === "total" ? player.projection?.total : sort === "week" ? player.projection?.weekPoints : player.nick;
-          entries.sort(([, a], [, b]) => {
-            const va = value(a), vb = value(b);
-            if (va === void 0) return vb === void 0 ? a.nick.localeCompare(b.nick) : 1;
-            if (vb === void 0) return -1;
-            const difference = typeof va === "string" && typeof vb === "string" ? va.localeCompare(vb) : Number(va) - Number(vb);
-            return difference * direction || a.nick.localeCompare(b.nick);
-          });
-          for (const th of headers.querySelectorAll("th")) {
-            const key = th.querySelector("[data-bettergeo-race-sort]")?.dataset.bettergeoRaceSort;
-            if (key === sort)
-              th.setAttribute("aria-sort", direction === 1 ? "ascending" : "descending");
-            else th.removeAttribute("aria-sort");
-          }
-          const nativeBoard = [...content.querySelectorAll('[class*="global-leaderboard_leaderboard__"]')].find(
-            (node) => !panel.contains(node)
-          ) ?? null;
-          const fragment = document.createDocumentFragment();
-          for (const [index, [id, player]] of entries.entries()) {
-            const rating = player.rating;
-            const row = element("tr", c("global-leaderboard-row_row__Vk0Dt"));
-            const orderCell = element("td", c("global-leaderboard-row_rankCell__rhsqZ"));
-            orderCell.append(
-              element("div", c("global-leaderboard-row_rank__UxnQx"), String(index + 1))
-            );
-            orderCell.title = "Position in the current sort order";
-            const rankCell = element("td", c("global-leaderboard-row_rankCell__rhsqZ"));
-            rankCell.title = "Projected regional position";
-            rankCell.append(
-              element(
-                "div",
-                c("global-leaderboard-row_rank__UxnQx"),
-                String(player.projection?.position ?? player.position ?? "\u2014")
-              )
-            );
-            const name = element("td", c("global-leaderboard-row_playerCell__8Gl9V"));
-            name.append(racePlayer(id, player, c, nativeBoard));
-            const ratingCell = element("td", c("global-leaderboard-row_ratingCell__CSoq3"));
-            ratingCell.append(
-              element(
-                "span",
-                c("global-leaderboard-row_ratingValue__AX7HJ"),
-                rating === void 0 ? "N/A" : rating.toLocaleString()
-              )
-            );
-            const totalCell = element(
-              "td",
-              `${c("global-leaderboard-row_ratingCell__CSoq3")} bettergeo-race-points`
-            );
-            totalCell.textContent = player.projection?.total.toLocaleString() ?? "N/A";
-            totalCell.title = "Projected total points if the snapshot week ended now";
-            const weekCell = element(
-              "td",
-              `${c("global-leaderboard-row_ratingCell__CSoq3")} bettergeo-race-points`
-            );
-            weekCell.textContent = player.projection?.weekPoints.toLocaleString() ?? "N/A";
-            weekCell.title = player.projection ? `Week ${player.projection.weekIndex + 1}: projected points \xB7 ${player.projection.gamesWeek} games played` : "Weekly projection unavailable";
-            row.append(orderCell, rankCell, name, ratingCell, totalCell, weekCell);
-            fragment.append(row);
-          }
-          body.replaceChildren(fragment);
-          updated.textContent = `Updated ${new Date(snapshot.loadedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
-          const projection = snapshot.players.values().next().value?.projection;
-          updated.title = `Snapshot from ${new Date(snapshot.loadedAt).toLocaleString()}. Standings update every 5 minutes; the refresh button reloads the shared server cache.`;
-          status.textContent = refreshFailed ? "Could not refresh race standings. Showing the last successful snapshot." : projection?.waitingForWeek ? "Waiting for this week\u2019s leaderboard. Showing the previous snapshot." : projection?.stale ? "Update delayed. Showing the last successful snapshot." : entries.length ? "" : "No participants in this region.";
-          status.hidden = !status.textContent;
-        }
-        for (const label of ["All", "APAC", "EMEA", "Americas"]) {
-          const filter = element("button", c("tabs_trigger__KOf2y"), label);
-          filter.dataset.state = label === region ? "active" : "inactive";
-          filter.type = "button";
-          filter.setAttribute("aria-pressed", String(label === region));
-          cycle.listen(filter, "click", () => {
-            region = label;
-            for (const item of filters.querySelectorAll("button")) {
-              item.setAttribute("aria-pressed", String(item === filter));
-              item.dataset.state = item === filter ? "active" : "inactive";
-            }
-            updateFilterUnderline();
-            render();
-          });
-          filterScroller.append(filter);
-        }
-        function updateFilterUnderline() {
-          const selected = filterScroller.querySelector('[aria-pressed="true"]');
-          filterScroller.style.setProperty("--tab-list-w", `${filterScroller.scrollWidth}px`);
-          filterScroller.style.setProperty("--tab-active-w", `${selected?.offsetWidth ?? 0}px`);
-          filterScroller.style.setProperty("--tab-active-x", `${selected?.offsetLeft ?? 0}px`);
-        }
-        cycle.listen(window, "resize", updateFilterUnderline);
-        function deactivate() {
-          active = false;
-          request?.abort();
-          request = void 0;
-          shell.classList.remove("bettergeo-race-open");
-          panel.hidden = true;
-          filters.hidden = true;
-          button.setAttribute("aria-selected", "false");
-          button.dataset.state = "inactive";
-          for (const [tab, values] of nativeAttributes) {
-            attributeNames.forEach((name, index) => {
-              const value = values[index];
-              if (value == null) tab.removeAttribute(name);
-              else tab.setAttribute(name, value);
-            });
-          }
-          nativeAttributes.clear();
-        }
-        async function load(force = false) {
-          request?.abort();
-          const controller = new AbortController();
-          request = controller;
-          const signal = controller.signal;
-          retry.hidden = true;
-          refresh.disabled = true;
-          status.hidden = false;
-          board.hidden = !snapshot;
-          panel.setAttribute("aria-busy", "true");
-          status.textContent = snapshot ? "Refreshing race standings\u2026" : "Loading race participants\u2026";
-          try {
-            const players = await api2.onlineRacePlayers(signal, force);
-            signal.throwIfAborted();
-            acceptPlayers(players);
-            refreshFailed = false;
-            snapshot = {
-              players,
-              loadedAt: players.values().next().value?.projection?.updatedAt ?? Date.now()
-            };
-            if (!cycle.active || !active) return;
-            render();
-            board.hidden = false;
-          } catch {
-            if (!signal.aborted && cycle.active && active) {
-              refreshFailed = true;
-              if (snapshot) render();
-              else status.textContent = "Could not load race standings. Please try again.";
-              retry.hidden = false;
-            }
-          } finally {
-            if (request === controller) {
-              request = void 0;
-              refresh.disabled = false;
-              panel.removeAttribute("aria-busy");
-            }
-          }
-        }
-        const refreshTimer = setInterval(() => {
-          if (active) void load();
-        }, 5 * 6e4);
-        cycle.own(() => clearInterval(refreshTimer));
-        cycle.listen(retry, "click", () => {
-          void load(true);
-        });
-        cycle.listen(refresh, "click", () => {
-          void load(true);
-        });
-        cycle.listen(button, "click", (event) => {
-          event.stopPropagation();
-          if (active) return;
-          active = true;
-          for (const tab of tabs.querySelectorAll('[role="tab"]')) {
-            if (tab === button) continue;
-            nativeAttributes.set(
-              tab,
-              attributeNames.map((name) => tab.getAttribute(name))
-            );
-            tab.setAttribute("aria-selected", "false");
-            tab.setAttribute("data-state", "inactive");
-          }
-          button.setAttribute("aria-selected", "true");
-          button.dataset.state = "active";
-          shell.classList.add("bettergeo-race-open");
-          panel.hidden = false;
-          filters.hidden = false;
-          updateFilterUnderline();
-          void load();
-        });
-        cycle.listen(button, "keydown", (event) => {
-          const key = event.key;
-          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(key)) return;
-          event.preventDefault();
-          event.stopPropagation();
-          const native = [...tabs.querySelectorAll('button[role="tab"]')].filter(
-            (tab) => tab !== button
-          );
-          const target = key === "ArrowLeft" ? native.at(-1) : key === "End" ? button : native[0];
-          target?.click();
-          target?.focus();
-        });
-        const nativeClick = (event) => {
-          if (active && event.target instanceof Element && !panel.contains(event.target) && !filters.contains(event.target) && event.target.closest("button") !== button)
-            deactivate();
-        };
-        shell.addEventListener("click", nativeClick, true);
-        cycle.own(() => {
-          deactivate();
-          shell.removeEventListener("click", nativeClick, true);
-          button.remove();
-          panel.remove();
-          filters.remove();
-        });
-      })
-    );
-  }
-  var CSS5 = `
-.bettergeo-race-open [class*="leaderboard-shell_content__"] > :not(.bettergeo-race-panel),
-.bettergeo-race-open [class*="global-leaderboard_modeTabs__"]:not(.bettergeo-race-filters) { display: none !important; }
-.bettergeo-race-open [class*="global-leaderboard_scopeTabs__"] [role="tablist"]::after { display: none; }
-.bettergeo-race-tab[aria-selected="true"] { color: inherit; box-shadow: inset 0 -2px currentColor; }
-.bettergeo-race-panel { display: flex; flex: 1 1 0; flex-direction: column; min-height: 0; overflow: hidden; }
-.bettergeo-race-panel[hidden], .bettergeo-race-panel [hidden], .bettergeo-race-filters[hidden] { display: none !important; }
-.bettergeo-race-status { flex: none; margin: 0; padding: .75rem 1rem; font: inherit; font-size: .75rem; opacity: .7; }
-.bettergeo-race-retry { margin: 0 1rem .75rem; }
-.bettergeo-race-metadata { float: right; display: inline-flex; align-items: center; gap: .375rem; margin-left: .5rem; font-size: 9px; font-style: normal; font-weight: 400; text-transform: none; }
-.bettergeo-race-updated { opacity: .65; }
-.bettergeo-race-refresh { display: inline-flex; align-items: center; border: 0; padding: 0; background: none; color: inherit; cursor: pointer; }
-.bettergeo-race-refresh:hover { opacity: .7; }
-.bettergeo-race-refresh:disabled { opacity: .4; cursor: wait; }
-.bettergeo-race-refresh:focus-visible { outline: 1px solid currentColor; outline-offset: 3px; border-radius: 2px; }
-.bettergeo-race-panel [class*="global-leaderboard_leaderboard__"] > table { flex: none; }
-.bettergeo-race-results { flex: 1 1 0; min-height: 0; max-height: none; overflow: auto; }
-.bettergeo-race-filters button[aria-pressed="true"] { color: inherit; }
-.bettergeo-race-filters { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
-.bettergeo-race-sort-header { border: 0; padding: 0; background: none; color: inherit; font: inherit; text-transform: inherit; cursor: pointer; white-space: nowrap; }
-.bettergeo-race-sort-header:focus-visible { outline: 1px solid currentColor; outline-offset: 3px; }
-.bettergeo-race-table th[aria-sort] { color: #fff; }
-.bettergeo-race-table th[aria-sort] .bettergeo-race-sort-header::after { margin-left: 3px; font-size: 9px; }
-.bettergeo-race-table th[aria-sort="ascending"] .bettergeo-race-sort-header::after { content: '\u25B2'; }
-.bettergeo-race-table th[aria-sort="descending"] .bettergeo-race-sort-header::after { content: '\u25BC'; }
-.bettergeo-race-board { min-width: 0; overflow-x: auto; }
-.bettergeo-race-table { table-layout: fixed; width: 100%; min-width: 660px; }
-.bettergeo-race-results { min-width: 660px; }
-.bettergeo-race-points { text-align: right; font-variant-numeric: tabular-nums; }
-
-`;
-
-  // src/features/online-race.ts
-  var selector = '[class*="global-leaderboard-row_player__"] a[href*="/user/"], [class*="leaderboard"] [class*="player-nick_wrapper__"] a[href*="/user/"]';
-  var onlineRace = {
-    id: "online-race",
-    name: "Online race leaderboard tags",
-    description: "Tag World League race participants and add an ELO Race leaderboard with region filters.",
-    enable(services, scope) {
-      const { api: api2, events: events2 } = services;
-      const badges = /* @__PURE__ */ new Map();
-      const style = element("style");
-      style.textContent = `.bettergeo-online-race {
-      display: inline-block; flex-shrink: 0; white-space: nowrap;
-      padding: 2px 5px; border: 1px solid currentColor; border-radius: 4px;
-      color: #ddd; background: #ffffff14;
-      font-size: 10px; font-weight: 700; line-height: 1.3;
-      vertical-align: middle; cursor: help;
-    }
-    /* World Championship race-standings region colours (design-system shade 50). */
-    .bettergeo-online-race[data-region="APAC"] {
-      color: #e94555; background: #e9455520;
-    }
-    .bettergeo-online-race[data-region="EMEA"] {
-      color: #00a2fe; background: #00a2fe20;
-    }
-    .bettergeo-online-race[data-region="Americas"] {
-      color: #3ae8bd; background: #3ae8bd20;
-    }`;
-      let players;
-      let loading = false;
-      let expires = 0;
-      let retryAt = 0;
-      let onDuels = false;
-      let generation = 0;
-      installRaceLeaderboard(services, scope, (result) => {
-        generation++;
-        players = result;
-        loading = false;
-        expires = Date.now() + 5 * 6e4;
-        retryAt = 0;
-        events2.schedule();
-      });
-      const refreshTimer = setInterval(() => events2.schedule(), 5 * 6e4);
-      scope.own(() => clearInterval(refreshTimer));
-      scope.own(() => {
-        badges.forEach((badge) => badge.remove());
-        badges.clear();
-        style.remove();
-      });
-      scope.own(
-        events2.subscribe(() => {
-          const isDuels = /^\/(?:[a-z]{2}\/)?multiplayer\/duels\/?$/.test(location.pathname);
-          if (isDuels !== onDuels) {
-            onDuels = isDuels;
-            generation++;
-            loading = false;
-            expires = 0;
-            retryAt = 0;
-            players = void 0;
-          }
-          const links = new Set(
-            isDuels ? [...document.querySelectorAll(selector)].filter(
-              (link2) => !link2.closest(".bettergeo-race-panel")
-            ) : []
-          );
-          for (const [link2, badge] of badges) {
-            const id = new URL(link2.href).pathname.match(/\/user\/([a-f0-9]{24})\/?$/i)?.[1];
-            const player = id ? players?.get(id) : void 0;
-            if (!links.has(link2) || !badge.isConnected || badge.parentElement !== (link2.closest('[class*="player-nick_wrapper__"]') ?? link2.parentElement) || !player) {
-              badge.remove();
-              badges.delete(link2);
-            } else {
-              refreshRaceBadge(badge, player);
-              const container = badge.parentElement;
-              if (container.lastElementChild !== badge) container.append(badge);
-            }
-          }
-          if (!isDuels) return;
-          if (!style.isConnected) document.head.append(style);
-          if (!loading && Date.now() >= expires && Date.now() >= retryAt) {
-            loading = true;
-            const requestGeneration = generation;
-            void api2.onlineRacePlayers(scope.signal).then((result) => {
-              if (!scope.active || requestGeneration !== generation) return;
-              players = result;
-              expires = Date.now() + 5 * 6e4;
-              events2.schedule();
-            }).catch((error) => {
-              if (!scope.active || requestGeneration !== generation) return;
-              retryAt = Date.now() + 6e4;
-              if (scope.active) console.error("[BetterGEO online race]", error);
-            }).finally(() => {
-              if (requestGeneration === generation) loading = false;
-            });
-          }
-          if (!players) return;
-          for (const link2 of links) {
-            if (badges.has(link2)) continue;
-            const id = new URL(link2.href).pathname.match(/\/user\/([a-f0-9]{24})\/?$/i)?.[1];
-            const player = id ? players.get(id) : void 0;
-            if (!player) continue;
-            const badge = element("span", "bettergeo-online-race");
-            refreshRaceBadge(badge, player);
-            badge.tabIndex = 0;
-            (link2.closest('[class*="player-nick_wrapper__"]') ?? link2.parentElement)?.append(badge);
-            badges.set(link2, badge);
-          }
-        })
-      );
-    }
-  };
 
   // src/main.ts
   var page = unsafeWindow;
@@ -3476,7 +2847,6 @@ footer { padding: 16px 24px 20px; color: #787884; font-size: 11px; }
       summaryRecovery,
       gameResults,
       matchHistory,
-      onlineRace,
       profileStatus,
       countryPerformance,
       randomMap,

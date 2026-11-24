@@ -2,6 +2,7 @@ import { profileWidget } from '../core/profile-widget';
 import { element, link } from '../core/dom';
 import { nativeStyles } from '../core/native-styles';
 import { duelPath } from '../geoguessr/routes';
+import * as css from '../geoguessr/styles';
 import type { HistoryEntry, Player } from '../geoguessr/types';
 type Styles = ReturnType<typeof nativeStyles>;
 const modeNames: Record<string, string> = {
@@ -9,23 +10,25 @@ const modeNames: Record<string, string> = {
   NoMoveDuels: 'No move',
   StandardDuels: 'Moving',
 };
-const assets = {
-  recent: '/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fgamemode-recent.322c02eb.webp&w=640&q=75',
-  replay: '/_next/static/media/replay.42141ac7.svg',
-  summary: '/_next/static/media/location-pin.f96f50a0.svg',
-};
+/** Native classes plus a stable `bgh-*` hook for the fallback stylesheet. */
+function node<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  native: string,
+  hook: string,
+  text?: string,
+) {
+  return element(tag, `${native} bgh-${hook}`.trim(), text);
+}
 export function historyView(entries: HistoryEntry[], userId: string, showAll: () => void) {
-  const icon = image(assets.recent, '', 224, 230);
+  const icon = image(css.images.recentDuels, '', 512, 512);
   icon.alt = 'recent duels';
   const { root: widget, body, header, content, styles } = profileWidget('Recent Duels', icon);
-  const c = styles.resolve;
   widget.classList.add('bettergeo-history');
   widget.id = 'bettergeo-match-history';
-  if (!styles.has('game-history-list-item_card__'))
-    widget.classList.add('bettergeo-history-fallback');
+  if (!styles.module(css.historyItem).styled) widget.classList.add('bettergeo-history-fallback');
   content.classList.add('bettergeo-history-title-line');
   content.append(element('small', 'bettergeo-history-credit', '(unhidden by BetterGEO)'));
-  const right = element('div', c('widget_rightSlot__rRuhJ'));
+  const right = node('div', styles.module(css.widget).cls('rightSlot'), 'right-slot');
   const all = nativeButton('View all', styles);
   all.addEventListener('click', showAll);
   right.append(all);
@@ -33,42 +36,42 @@ export function historyView(entries: HistoryEntry[], userId: string, showAll: ()
   body.replaceWith(carousel(entries.slice(0, 5), userId, styles));
   return widget;
 }
-function nativeButton(text: string, styles = nativeStyles()) {
-  const c = styles.resolve;
-  const button = element(
-    'button',
-    c('button_button__HOmVR', 'button_variantTertiary__WLCY9', 'button_sizeSmall__1lL87'),
-  );
+function nativeButton(text: string, styles: Styles) {
+  const b = styles.module(css.button);
+  const button = node('button', b.cls('button', 'variantTertiary', 'sizeSmall'), 'button');
   button.type = 'button';
-  const wrapper = element('div', c('button_wrapper__C_4h8'));
-  wrapper.append(element('span', c('button_label__mIsIc'), text));
+  const wrapper = element('div', b.cls('wrapper'));
+  wrapper.append(element('span', b.cls('label'), text));
   button.append(wrapper);
   return button;
 }
 function carousel(entries: HistoryEntry[], userId: string, styles: Styles) {
-  const c = styles.resolve;
-  const widgetCarousel = element('div', c('widget_widgetCarousel__IAEDC'));
-  const root = element('div', c('game-history-modal_carouselRoot__xADZm'));
-  const container = element('div', c('carousel_carouselContainer__E1d_M'));
-  const wrapper = element('div', c('carousel_carouselWrapper__OeuWZ'));
-  const inner = element('div', c('carousel_carouselInner__n0vjp'));
-  const spread = element('div', c('carousel_spread__YVvsz'));
-  const item = element('div', c('game-history-modal_carouselItem__gZWWQ'));
+  const c = styles.module(css.carousel),
+    modal = styles.module(css.historyModal);
+  const widgetCarousel = element('div', styles.module(css.profileWidget).cls('widgetCarousel'));
+  const root = element('div', modal.cls('carouselRoot'));
+  const container = node('div', c.cls('carouselContainer'), 'carousel');
+  const wrapper = node('div', c.cls('carouselWrapper'), 'carousel-wrapper');
+  const inner = element('div', c.cls('carouselInner'));
+  const spread = element('div', c.cls('spread'));
+  const item = element('div', modal.cls('carouselItem'));
   // Keep one visible native card. This also avoids depending on React's carousel transforms.
   item.style.cssText = 'width:min(100%,640px);max-width:100%;flex:0 0 auto;margin-inline:auto';
   spread.style.cssText = 'width:100%;display:flex;justify-content:center';
   spread.append(item);
   inner.append(spread);
   wrapper.append(inner);
-  const indicators = element('div', c('carousel_indicatorWrapper__MlquS'));
+  const indicators = node('div', c.cls('indicatorWrapper'), 'indicators');
   let index = 0;
   const left = arrow('Previous duel', 'left', styles),
     right = arrow('Next duel', 'right', styles);
+  const active = c.cls('active') || 'bgh-active';
   const dots = entries.map((entry, position) => {
     const won = entry.duel?.winnerId === userId;
-    const dot = element(
+    const dot = node(
       'button',
-      c('carousel_indicator__FO2KP', won ? 'carousel_green__8yLi7' : 'carousel_red__vZJ2m'),
+      c.cls('indicator', won ? 'green' : 'red'),
+      `indicator bgh-${won ? 'green' : 'red'}`,
     );
     dot.type = 'button';
     dot.setAttribute('aria-label', `Show duel ${position + 1}`);
@@ -89,7 +92,8 @@ function carousel(entries: HistoryEntry[], userId: string, styles: Styles) {
     left.style.visibility = left.disabled ? 'hidden' : '';
     right.style.visibility = right.disabled ? 'hidden' : '';
     dots.forEach((dot, i) => {
-      dot.classList.toggle(c('carousel_active__Epbsk'), i === index);
+      dot.classList.toggle(active, i === index);
+      dot.classList.toggle('bgh-active', i === index);
       dot.setAttribute('aria-current', i === index ? 'true' : 'false');
     });
     item.setAttribute('aria-label', `Duel ${index + 1} of ${entries.length}`);
@@ -115,18 +119,16 @@ function carousel(entries: HistoryEntry[], userId: string, styles: Styles) {
   return widgetCarousel;
 }
 function arrow(label: string, side: 'left' | 'right', styles: Styles) {
-  const c = styles.resolve;
-  const button = element(
+  const c = styles.module(css.carousel);
+  const button = node(
     'button',
-    c(
-      'carousel_arrowButton__XGlCA',
-      side === 'left' ? 'carousel_leftArrowButton__ifAeT' : 'carousel_rightArrowButton__VF_2e',
-    ),
+    c.cls('arrowButton', side === 'left' ? 'leftArrowButton' : 'rightArrowButton'),
+    'arrow-button',
   );
   button.type = 'button';
   button.setAttribute('aria-label', label);
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('class', c('carousel_arrowSvg__XrIgh'));
+  svg.setAttribute('class', `${c.cls('arrowSvg')} bgh-arrow-svg`.trim());
   svg.setAttribute('viewBox', '0 0 24 24');
   svg.setAttribute('aria-hidden', 'true');
   const path = document.createElementNS(svg.namespaceURI, 'path');
@@ -140,13 +142,14 @@ function arrow(label: string, side: 'left' | 'right', styles: Styles) {
   button.append(svg);
   return button;
 }
+/** Mirrors GeoGuessr's game-history list item: the whole card links to the summary. */
 export function gameCard(
   entry: HistoryEntry,
   userId: string,
   styles = nativeStyles(),
   showDate = true,
 ) {
-  const c = styles.resolve,
+  const c = styles.module(css.historyItem),
     duel = entry.duel!;
   const ratings = new Map(
     duel.teams?.flatMap((team) => team.players.map((player) => [player.playerId, player] as const)),
@@ -158,39 +161,20 @@ export function gameCard(
       rating: ratings.get(player.id)?.rankedSystemRating ?? player.rating,
       tier: ratings.get(player.id)?.tier ?? player.tier,
     }));
-  const item = element('div', c('game-history-list-item_item__rRU_J'));
-  const result = !duel.winnerId
-    ? []
-    : [
-        duel.winnerId === userId
-          ? 'game-history-list-item_primaryUserWon__RmuIy'
-          : 'game-history-list-item_opponentWon__vX27C',
-      ];
-  const card = element('div', c('game-history-list-item_card__4tf1Q', ...result));
-  const data = element('div', c('game-history-list-item_gameData__etu0v'));
-  const left = element(
-    'div',
-    c(
-      'game-history-list-item_gameDataSide__WonRL',
-      'game-history-list-item_gameDataSideLeft__PvVLQ',
-    ),
-  );
-  const right = element(
-    'div',
-    c(
-      'game-history-list-item_gameDataSide__WonRL',
-      'game-history-list-item_gameDataSideRight__6KUOb',
-    ),
-  );
-  const center = element('div', c('game-history-list-item_centerColumn__OcNCH'));
-  center.append(
-    element(
-      'span',
-      c('game-history-list-item_mode__DhY8T'),
-      modeNames[duel.gameMode ?? ''] ?? duel.gameMode ?? 'Duels',
-    ),
-    element('div', c('game-history-list-item_vs__0Dtj2'), 'VS'),
-  );
+  const outcome = !duel.winnerId
+    ? 'tie'
+    : duel.winnerId === userId
+      ? 'primaryUserWon'
+      : 'opponentWon';
+  const item = node('div', c.cls('item', 'link'), 'item');
+  const card = node('div', c.cls('card', outcome), `card bgh-${outcome}`);
+  const data = node('div', c.cls('gameData'), 'game-data');
+  const left = node('div', c.cls('gameDataSide', 'gameDataSideLeft'), 'side');
+  const right = node('div', c.cls('gameDataSide', 'gameDataSideRight'), 'side');
+  const center = node('div', c.cls('centerColumn'), 'center');
+  const mode = modeNames[duel.gameMode ?? ''];
+  if (mode) center.append(node('span', c.cls('mode'), 'mode', mode));
+  center.append(node('div', c.cls('vs'), 'vs', 'VS'));
   if (players[0])
     left.append(
       playerColumn(players[0], 'left', duel.winnerId, styles),
@@ -199,34 +183,12 @@ export function gameCard(
   for (const player of players.slice(1))
     right.append(avatar(player, styles), playerColumn(player, 'right', duel.winnerId, styles));
   data.append(left, center, right);
-  const actions = element('div', c('game-history-actions_actions__Y626Q'));
-  for (const view of ['replay', 'summary'] as const) {
-    const tooltip = element('span', c('tooltip_reference___tWvM'));
-    const action = link(
-      '',
-      duelPath(entry.gameId, view),
-      c('link_anchor__TGl1_', 'game-history-actions_actionBtn__u4zj2'),
-    );
-    action.title = view === 'replay' ? 'Replay' : 'Summary';
-    action.setAttribute('aria-label', action.title);
-    // An anchor styled as the native icon button avoids nesting interactive controls.
-    const icon = image(
-      assets[view],
-      c('game-history-actions_actionIcon__ohM8d'),
-      view === 'replay' ? 22 : 24,
-      view === 'replay' ? 22 : 24,
-    );
-    icon.alt = view;
-    action.append(icon);
-    tooltip.append(action);
-    actions.append(tooltip);
-  }
   const date = duel.rounds?.[0]?.startTime;
   if (date && Number.isFinite(Date.parse(date))) {
     const when = new Date(date);
     item.title = when.toLocaleString();
     if (showDate) {
-      const dateSlot = element('span', c('game-history-list-item_date__G_uNE'));
+      const dateSlot = node('span', c.cls('date'), 'date');
       const text = element(
         'span',
         '',
@@ -237,9 +199,39 @@ export function gameCard(
       center.append(dateSlot);
     }
   }
-  card.append(data, actions);
+  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  icon.setAttribute('class', `${c.cls('arrow')} bgh-card-arrow`.trim());
+  icon.setAttribute('viewBox', '0 0 24 24');
+  icon.setAttribute('fill', 'none');
+  icon.setAttribute('stroke', 'currentColor');
+  icon.setAttribute('stroke-width', '2');
+  icon.setAttribute('stroke-linecap', 'round');
+  icon.setAttribute('stroke-linejoin', 'round');
+  icon.setAttribute('aria-hidden', 'true');
+  const line = document.createElementNS(icon.namespaceURI, 'line');
+  for (const [key, value] of Object.entries({ x1: '4', y1: '12', x2: '20', y2: '12' }))
+    line.setAttribute(key, value);
+  const head = document.createElementNS(icon.namespaceURI, 'polyline');
+  head.setAttribute('points', '13 5 20 12 13 19');
+  icon.append(line, head);
+  const overlay = link(
+    '',
+    duelPath(entry.gameId, 'summary'),
+    `${c.cls('cardOverlay')} bgh-overlay`,
+  );
+  overlay.setAttribute('aria-label', 'Game analysis');
+  card.append(data, icon, overlay);
   item.append(card);
   return item;
+}
+/** Nick and flag classes come from the profile header's native nick, when present. */
+function nickClasses() {
+  const wrapper = document.querySelector('[data-qa="user-card-title"] h1 > div');
+  return {
+    wrapper: wrapper?.className ?? '',
+    nick: wrapper?.querySelector(':scope > span, :scope > a')?.className ?? '',
+    flag: wrapper?.querySelector(':scope > img[title]')?.getAttribute('class') ?? '',
+  };
 }
 function playerColumn(
   player: Player,
@@ -247,43 +239,32 @@ function playerColumn(
   winnerId: string | undefined,
   styles: Styles,
 ) {
-  const c = styles.resolve;
-  const column = element(
-    'div',
-    c(
-      side === 'left'
-        ? 'game-history-player-column_left__cXQn4'
-        : 'game-history-player-column_right__vW2fr',
+  const c = styles.module(css.historyPlayer),
+    names = styles.module(css.historyNick),
+    template = nickClasses();
+  const column = node('div', c.cls(side), side);
+  const result = !winnerId ? 'tie' : player.id === winnerId ? 'victory' : 'defeat';
+  column.append(
+    node(
+      'span',
+      c.cls(result),
+      result,
+      { tie: 'DRAW', victory: 'VICTORY!', defeat: 'DEFEAT!' }[result],
     ),
   );
-  if (winnerId)
-    column.append(
-      element(
-        'span',
-        c(
-          player.id === winnerId
-            ? 'game-history-player-column_victory__PkWR6'
-            : 'game-history-player-column_defeat__Zv4p5',
-        ),
-        player.id === winnerId ? 'VICTORY!' : 'DEFEAT!',
-      ),
-    );
-  const nick = element('div', c('ellipsed-user-nick_root__8MmmI'));
-  const identity = element(
-    'div',
-    c('player-nick_wrapper__WjkG6', 'ellipsed-user-nick_identity__YFhgt'),
-  );
+  const nick = element('div', names.cls('root'));
+  const identity = node('div', `${template.wrapper} ${names.cls('identity')}`.trim(), 'identity');
   identity.append(
     link(
       player.nick || 'Unknown',
       `/user/${encodeURIComponent(player.id)}`,
-      c('link_anchor__TGl1_', 'nick_nick__THesc', 'ellipsed-user-nick_nick__WF5w5'),
+      `${template.nick} ${names.cls('nick')} bgh-nick`.trim(),
     ),
   );
   if (player.countryCode && /^[a-z]{2}$/i.test(player.countryCode)) {
     const flag = image(
       `https://flagcdn.com/w40/${player.countryCode.toLowerCase()}.png`,
-      c('flag_flag__Fsx7Z', 'player-nick_flag__yQWK5'),
+      template.flag,
       21,
       15,
     );
@@ -291,36 +272,33 @@ function playerColumn(
     identity.append(flag);
   }
   nick.append(identity);
-  const rating = element('div', c('game-history-player-column_rating__mqEKT'));
-  rating.append(
-    element('span', c('game-history-player-column_ratingLabel____9TC'), 'Rating'),
-    ` ${player.rating ?? '—'}`,
-  );
+  const rating = node('div', c.cls('rating'), 'rating');
+  if (player.rating !== undefined)
+    rating.append(
+      node('span', c.cls('ratingLabel'), 'rating-label', 'Rating'),
+      ` ${player.rating}`,
+    );
   column.append(nick, rating);
   return column;
 }
 function avatar(player: Player, styles: Styles) {
-  const c = styles.resolve;
-  const cell = element('div', c('game-history-list-item_avatarCell__Z1U6s'));
-  const title = element('div', c('avatar_titleAvatar__JsMrO'));
-  const img = element('div', c('avatar_titleAvatarImage__sXIP7'));
+  const c = styles.module(css.avatar);
+  const cell = node('div', styles.module(css.historyItem).cls('avatarCell'), 'avatar-cell');
+  const title = node('div', c.cls('titleAvatar'), 'avatar');
+  const img = node('div', c.cls('titleAvatarImage'), 'avatar-image');
   if (player.pin?.url) {
     const portrait = image(
-      `/images/resize:auto:48:48/gravity:ce/plain/${player.pin.url}`,
-      c('styles_image__3rHlb'),
+      `/images/resize:fit:96:0/gravity:ce/plain/${player.pin.url}`,
+      c.cls('image'),
     );
-    // Next/Image's fill styles are inline in the native markup, not in its CSS module.
-    portrait.style.cssText =
-      'position:absolute;width:100%;inset:0;object-fit:cover;color:transparent';
     portrait.loading = 'eager';
     portrait.decoding = 'async';
     img.append(portrait);
   }
   const border = image(
     `/static/avatars/tiers/low-quality/tier-${Number.isFinite(player.tier) ? player.tier : 100}.webp`,
-    c('avatar_titleAvatarBorder__QmnOl'),
+    `${c.cls('titleAvatarBorder', 'titleAvatarBorderImage')} bgh-avatar-border`.trim(),
   );
-  border.style.cssText = 'position:absolute;height:100%;width:100%;inset:0;color:transparent';
   border.decoding = 'async';
   title.append(img, border);
   cell.append(title);

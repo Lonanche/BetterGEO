@@ -1,35 +1,39 @@
 import { element } from './dom';
 import { nativeStyles } from './native-styles';
+import * as css from '../geoguessr/styles';
 /** Native profile card shell, with content supplied by the feature. */
 export function profileWidget(title: string, icon: HTMLImageElement) {
-  const styles = nativeStyles(),
-    c = styles.resolve;
-  const root = element('div', c('profile-v2_widgetRow__n1A_N'));
-  const widget = element('div', c('widget_root__KcxU_', 'widget_compact__eg_L_'));
-  const border = element('div', c('widget_widgetBorder__aJQpv', 'widget_hasLoaded__0Izv8'));
-  const outer = element('div', c('widget_widgetOuter__SOAB_'));
-  const inner = element('div', c('widget_widgetInner__qg276'));
+  const styles = nativeStyles();
+  const profile = styles.module(css.profile),
+    frame = styles.module(css.widget),
+    card = styles.module(css.profileWidget),
+    headline = styles.module(css.headline),
+    text = styles.module(css.typography);
+  const root = element('div', profile.cls('widgetRow'));
+  const widget = element('div', frame.cls('root', 'compact'));
+  const border = element('div', frame.cls('widgetBorder', 'hasLoaded'));
+  const outer = element('div', frame.cls('widgetOuter'));
+  const inner = element('div', frame.cls('widgetInner'));
   const heading = element(
     'h2',
-    c('headline_heading__Bc8S9', 'shared_boldWeight__VXL2d', 'headline_italic__im8EF'),
+    [headline.cls('heading'), text.cls('boldWeight'), headline.cls('italic')].join(' ').trim(),
     title,
   );
   heading.style.cssText = '--fs:var(--font-size-16);--lh:var(--line-height-16)';
-  const header = element('div', c('widget_header___ZOfT', 'widget_compact__eg_L_'));
-  const titleSlot = element('div', c('widget_title___eiUb'));
-  const titleRow = element('div', c('widget_header__8mkus'));
-  const content = element('div', c('widget_headerContent__Ljohq'));
+  const header = element('div', frame.cls('header', 'compact'));
+  const titleSlot = element('div', frame.cls('title'));
+  const titleRow = element('div', card.cls('header'));
+  const content = element('div', card.cls('headerContent'));
   content.append(heading);
-  icon.className = c('widget_icon__b0v5w');
-  titleRow.append(icon);
-  titleRow.append(content);
+  icon.className = card.cls('icon');
+  titleRow.append(icon, content);
   titleSlot.append(titleRow);
   header.append(titleSlot);
   const body = element('div');
-  inner.append(header, element('div', c('widget_dividerWrapper__tCjRQ')), body);
+  inner.append(header, element('div', frame.cls('dividerWrapper')), body);
   outer.append(inner);
   border.append(outer);
   widget.append(border);
   root.append(widget);
-  return { root, body, inner, header, content, styles };
+  return { root, body, inner, header, titleRow, content, styles };
 }
