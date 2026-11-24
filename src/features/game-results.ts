@@ -1,12 +1,14 @@
 import type { Feature } from '../core/feature';
 import { mapId, resultPath } from '../geoguessr/routes';
+import { looseSelector, nativeSelector } from '../core/native-styles';
+import { mapScores } from '../geoguessr/styles';
+import { hydrated } from '../core/page';
 export const gameResults: Feature = {
   id: 'game-results',
   name: 'Map history result links',
   description: 'Add links to game results in the My Games score history on each map page.',
   enable({ events, api }, scope) {
     const games = api.scores;
-    const rowSelector = 'button[class*="map-detail-leaderboard_row__"], button[aria-expanded]';
     function clearResult(container: HTMLElement) {
       container.querySelector(':scope > .gg-result-action')?.remove();
       container.classList.remove('gg-result-row');
@@ -18,11 +20,12 @@ export const gameResults: Feature = {
         document.querySelectorAll<HTMLElement>('.gg-result-row').forEach(clearResult);
         return;
       }
+      const rowSelector = `button${nativeSelector(mapScores, 'row')}, button[aria-expanded]`;
       for (const row of document.querySelectorAll<HTMLElement>(rowSelector)) {
         const container = row.parentElement;
-        if (!container) continue;
+        if (!container || !hydrated(row)) continue;
         const date =
-          row.querySelector<HTMLElement>('[class*="cellDate__"] [title]') ||
+          row.querySelector<HTMLElement>(`${looseSelector('cellDate')} [title]`) ||
           [...row.querySelectorAll<HTMLElement>('[title]')].find((el) =>
             Number.isFinite(Date.parse(el.title)),
           );
@@ -30,7 +33,7 @@ export const gameResults: Feature = {
           clearResult(container);
           continue;
         }
-        const points = row.querySelector('[class*="cellPoints__"]');
+        const points = row.querySelector(looseSelector('cellPoints'));
         const timestamp = Date.parse(date.title);
         const scoreText = points?.textContent || row.textContent?.match(/([\d,\s]+)\s*pts\b/i)?.[1];
         const digits = scoreText?.replace(/[^0-9]/g, '');
@@ -50,7 +53,7 @@ export const gameResults: Feature = {
         }
         const href = `${location.origin}${resultPath(tokens.values().next().value!)}`;
         container.classList.add('gg-result-row');
-        const arrow = row.querySelector('[class*="expandButton__"]') || row.lastElementChild;
+        const arrow = row.querySelector(looseSelector('expandButton')) || row.lastElementChild;
         if (arrow) {
           const offset = `${Math.max(24, row.getBoundingClientRect().right - arrow.getBoundingClientRect().left + 8)}px`;
           if (container.style.getPropertyValue('--gg-icon-right') !== offset)
@@ -70,17 +73,8 @@ export const gameResults: Feature = {
         icon.alt = '';
         icon.width = 18;
         icon.height = 18;
-        icon.addEventListener(
-          'error',
-          () => {
-            // Self-contained fallback: no dependency on GeoGuessr's asset filename.
-            const svg =
-              '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7" r="1" fill="white" stroke="none"/></svg>';
-            icon.src = 'data:image/svg+xml,' + encodeURIComponent(svg);
-          },
-          { once: true },
-        );
-        icon.src = '/_next/static/media/info.1c18ae42.svg';
+        // Self-contained icon: GeoGuessr's asset filenames change between deploys.
+        icon.src = 'data:image/svg+xml,' + encodeURIComponent(infoIcon);
         link.appendChild(icon);
         const action = document.createElement('div');
         action.className = 'gg-result-action';
@@ -109,6 +103,8 @@ export const gameResults: Feature = {
   },
 };
 
+const infoIcon =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7" r="1" fill="white" stroke="none"/></svg>';
 const CSS = `
 .gg-result-row {
   display: grid !important;

@@ -1,0 +1,28 @@
+# Detects GeoGuessr site changes that break BetterGEO (renamed CSS classes, routes,
+# router internals) before users report missing UI. A failed scheduled run emails the
+# repository owner by default.
+name: GeoGuessr compatibility
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Check geoguessr.com against BetterGEO's selectors
+        run: npm run check:site

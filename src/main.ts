@@ -10,7 +10,6 @@ import { tournamentsLink } from './features/tournaments-link';
 import { randomMap } from './features/random-map';
 import { profileStatus } from './features/profile-status';
 import { matchHistory } from './features/match-history';
-import { onlineRace } from './features/online-race';
 const page = unsafeWindow;
 const network = new Network(page);
 const events = new PageEvents(page);
@@ -28,7 +27,6 @@ const manager = new FeatureManager(
     summaryRecovery,
     gameResults,
     matchHistory,
-    onlineRace,
     profileStatus,
     countryPerformance,
     randomMap,

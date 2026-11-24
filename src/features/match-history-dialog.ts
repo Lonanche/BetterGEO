@@ -1,80 +1,66 @@
 import { element } from '../core/dom';
-import { nativeStyles } from '../core/native-styles';
+import { nativeSelector, nativeStyles } from '../core/native-styles';
+import * as css from '../geoguessr/styles';
 import { Scope } from '../core/scope';
 import type { HistoryEntry } from '../geoguessr/types';
 import { gameCard } from './match-history-view';
 /** Native-shaped history overlay filtering the already loaded duel batch. */
 export function openHistoryDialog(initial: HistoryEntry[], userId: string, onClose: () => void) {
   const scope = new Scope(),
-    styles = nativeStyles(),
-    c = styles.resolve;
+    styles = nativeStyles();
+  const layout = styles.module(css.layout),
+    portalStyles = styles.module(css.overlayPortal),
+    modal = styles.module(css.overlayModal),
+    history = styles.module(css.historyModal),
+    list_ = styles.module(css.historyList),
+    picker = styles.module(css.select);
   const focused = document.activeElement;
   const dialog = element('dialog', 'bettergeo-duels');
   dialog.setAttribute('aria-label', 'Recent games');
-  if (!styles.has('game-history-modal_root__'))
-    dialog.classList.add('bettergeo-history-modal-fallback');
-  if (!styles.has('game-history-list-item_card__'))
-    dialog.classList.add('bettergeo-history-fallback');
-  const overlay = element('div', c('version4_fullOverlay__IQxsi'));
-  const portal = element('div', c('overlay-portal_destination__ghrwd'));
+  if (!history.styled || !modal.styled) dialog.classList.add('bettergeo-history-modal-fallback');
+  if (!styles.module(css.historyItem).styled) dialog.classList.add('bettergeo-history-fallback');
+  const overlay = element('div', `${layout.cls('fullOverlay')} bgh-overlay-root`.trim());
+  const portal = element('div', portalStyles.cls('destination'));
   const backlight = element(
     'div',
-    c(
-      'overlay-modal_backlight__RpQao',
-      'overlay-modal_backlightDark__TqpAA',
-      'overlay-modal_isAnimated__qxbgD',
-      'overlay-modal_blurBackground__9_zFe',
-    ),
+    `${modal.cls('backlight', 'backlightDark', 'isAnimated', 'blurBackground')} bgh-backlight`.trim(),
   );
   const container = element(
     'div',
-    c(
-      'overlay-modal_contentContainer___KC3A',
-      'overlay-modal_alignVerticallyCenter__oydwB',
-      'overlay-modal_isAnimated__qxbgD',
-    ),
+    `${modal.cls('contentContainer', 'alignVerticallyCenter', 'isAnimated')} bgh-modal-container`.trim(),
   );
   const content = element(
     'div',
-    c(
-      'overlay-modal_content__d7Vy6',
-      'overlay-modal_sizeLarge__oBI4H',
-      'overlay-modal_fullHeight__wQygj',
-    ),
+    `${modal.cls('content', 'sizeLarge', 'fullHeight')} bgh-modal-content`.trim(),
   );
-  const root = element('div', c('game-history-modal_root__TZJqh'));
-  const header = element('div', c('game-history-modal_divisionHeader__ELL4_'));
+  const root = element('div', history.cls('root'));
+  const header = element('div', `${history.cls('divisionHeader')} bgh-division`.trim());
   const ranked = [...document.querySelectorAll('h2')]
     .find((h) => /^ranked duels$/i.test(h.textContent?.trim() ?? ''))
-    ?.closest('[class*="widget_root__"]');
+    ?.closest(nativeSelector(css.widget, 'root'));
   const division = [...(ranked?.querySelectorAll('img') ?? [])].find((img) =>
     /champion|master|gold|silver|bronze/i.test(img.src),
   );
   const icon = division ? (division.cloneNode(false) as HTMLImageElement) : element('img');
-  if (!division)
-    icon.src =
-      '/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fgamemode-duels.f0444913.webp&w=640&q=75';
+  if (!division) icon.src = css.images.rankedDuels;
   icon.removeAttribute('id');
   icon.removeAttribute('class');
   icon.removeAttribute('style');
+  icon.removeAttribute('srcset');
   icon.alt = '';
   icon.width = 600;
   icon.height = 600;
   header.append(
     icon,
-    element('p', c('game-history-modal_divisionHeaderText__BeuNw'), 'Recent games'),
+    element('p', `${history.cls('divisionHeaderText')} bgh-division-text`.trim(), 'Recent games'),
   );
-  const dropdownContainer = element('div', c('game-history-modal_dropdownContainer__aYYv3'));
-  const dropdownSlot = element('div', c('game-history-modal_dropdown__tSpru'));
-  const dropdown = element(
+  const dropdownContainer = element(
     'div',
-    c(
-      'dropdown_dropdown__GxB04',
-      'dropdown_variantLightTransparent__YBisN',
-      'dropdown_sizeDefault__nhnvm',
-    ),
+    `${history.cls('dropdownContainer')} bgh-dropdown-container`.trim(),
   );
-  const select = element('select', c('dropdown_select__WtHWX'));
+  const dropdownSlot = element('div', history.cls('dropdown'));
+  const dropdown = element('div', picker.cls('dropdown', 'variantLightTransparent', 'sizeDefault'));
+  const select = element('select', `${picker.cls('select')} bgh-select`.trim());
   select.setAttribute('aria-label', 'Game mode');
   for (const [value, label] of [
     ['None', 'All'],
@@ -86,15 +72,15 @@ export function openHistoryDialog(initial: HistoryEntry[], userId: string, onClo
     option.value = value!;
     select.append(option);
   }
-  dropdown.append(select, element('div', c('dropdown_arrow__9Wc4k')));
+  dropdown.append(select, element('div', picker.cls('arrow')));
   dropdownSlot.append(dropdown);
   dropdownContainer.append(dropdownSlot);
-  const spacer = element('div', c('spacer_space__R4G0s', 'spacer_height__ovvoK'));
+  const spacer = element('div', styles.module(css.spacer).cls('space', 'height'));
   spacer.style.setProperty('--height', '32');
-  const leaderboard = element('div', c('game-history-modal_leaderboardWrapper__p3_RH'));
-  const listRoot = element('div', c('game-history-list_root__QvVPL'));
-  const listContainer = element('div', c('game-history-list_leaderboardContainer__FnLO5'));
-  const list = element('div', c('game-history-list_list__T_e20'));
+  const leaderboard = element('div', history.cls('leaderboardWrapper'));
+  const listRoot = element('div', list_.cls('root'));
+  const listContainer = element('div', list_.cls('leaderboardContainer'));
+  const list = element('div', list_.cls('list'));
   list.classList.add('bettergeo-duel-list');
   const status = element('p', 'bettergeo-history-status');
   status.setAttribute('role', 'status');
@@ -106,13 +92,13 @@ export function openHistoryDialog(initial: HistoryEntry[], userId: string, onClo
     header,
     dropdownContainer,
     spacer,
-    element('div', c('game-history-modal_separator__gP85P')),
+    element('div', `${history.cls('separator')} bgh-separator`.trim()),
     leaderboard,
   );
   content.append(root);
   const close = element(
     'button',
-    c('overlay-modal_closeButton__8QTzI', 'overlay-modal_closeButtonWhite__2Ozdd'),
+    `${modal.cls('closeButton', 'closeButtonWhite')} bgh-close`.trim(),
   );
   close.type = 'button';
   close.name = 'close';

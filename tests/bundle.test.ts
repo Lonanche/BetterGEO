@@ -2,14 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
+import * as css from '../src/geoguessr/styles';
+import { cls, nativeCss } from './native';
 
 test('built userscript composes features, toggles settings, and survives a cached pagehide', async () => {
   const dom = new JSDOM(
-    `
-    <div class="menu-item_dropdown___k8UR"><a class="menu-dropdown-item_dropdownItem__k29Nw" href="/maps?scope=all">Maps</a></div>
-    <div class="menu-item_dropdown___k8UR"><a class="menu-dropdown-item_dropdownItem__k29Nw" href="/multiplayer">Ranked Duels</a></div>
-    <div class="profile-v2_headerMainContent__x"><div class="profile-v2_proBadgeWrapper__x"><p data-qa="pro-tier">Pro</p></div></div>
-    <div class="profile-v2_staticWidgets__x"><div class="profile-v2_widgetRow__x"><h2>Ranked Duels</h2></div></div>`,
+    nativeCss +
+      `
+    <div class="${cls(css.menu, 'dropdown')}"><a class="${cls(css.menuItem, 'dropdownItem')}" href="/maps?scope=all">Maps</a></div>
+    <div class="${cls(css.menu, 'dropdown')}"><a class="${cls(css.menuItem, 'dropdownItem')}" href="/multiplayer">Ranked Duels</a></div>
+    <div class="${cls(css.profile, 'headerMainContent')}"><div class="${cls(css.profile, 'proBadgeWrapper')}"><p data-qa="pro-tier">Pro</p></div></div>
+    <div class="${cls(css.profile, 'staticWidgets')}"><div class="${cls(css.profile, 'widgetRow')}"><h2>Ranked Duels</h2></div></div>`,
     {
       url: 'https://www.geoguessr.com/user/person',
       runScripts: 'outside-only',
@@ -53,6 +56,8 @@ test('built userscript composes features, toggles settings, and survives a cache
       menu = callback;
     },
   });
+  // jsdom has no React: report the page as past the hydration fallback.
+  Object.defineProperty(page.performance, 'now', { value: () => 60_000 });
   page.HTMLDialogElement.prototype.showModal = function () {
     this.open = true;
   };

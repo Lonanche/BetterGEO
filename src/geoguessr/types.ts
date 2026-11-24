@@ -42,6 +42,7 @@ export interface Duel {
     isTeamDuels?: boolean;
     map?: { name?: string; slug?: string };
     mapSlug?: string;
+    maxRoundTime?: number;
     movementOptions?: { forbidRotating?: boolean; forbidMoving?: boolean };
     roundWinMultiplierIncrement?: number;
   };
@@ -54,26 +55,19 @@ export interface HistoryEntry {
 export interface GameHistory {
   entries: HistoryEntry[];
 }
-export interface AppProps {
-  accountProps?: { account?: { user?: { userId?: string } } };
-  pageProps?: { statusCode?: number; userId?: string; game?: unknown; [key: string]: unknown };
+/** Props GeoGuessr's route loaders return; the summary page reads these three. */
+export interface SummaryProps {
+  statusCode?: number;
+  game?: unknown;
+  userId?: string;
   [key: string]: unknown;
 }
-export interface NextData {
-  props?: AppProps;
-  query?: { token?: string };
+/** The subset of TanStack Router (exposed as `__TSR_ROUTER__`) recovery relies on. */
+export interface PageRouter {
+  state?: { matches?: { routeId?: string; loaderData?: { props?: SummaryProps } }[] };
+  invalidate(): Promise<unknown>;
 }
-export interface NextRouter {
-  isReady: boolean;
-  route: string;
-  components?: Record<string, { props?: AppProps }>;
-  replace(
-    url: string,
-    as?: string,
-    options?: { shallow: boolean; scroll: boolean },
-  ): Promise<boolean>;
-}
-export type PageWindow = Window & typeof globalThis & { next?: { router?: NextRouter } };
+export type PageWindow = Window & typeof globalThis & { __TSR_ROUTER__?: PageRouter };
 
 /** Public profile endpoint exposes a single suspension expiry, not an audit log. */
 export interface UserModerationStatus {

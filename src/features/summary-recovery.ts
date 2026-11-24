@@ -1,8 +1,21 @@
 import type { Feature } from '../core/feature';
+import { nativeSelector } from '../core/native-styles';
+import { hydrated } from '../core/page';
 import { duelId } from '../geoguessr/routes';
-import { nativeProps } from '../geoguessr/summary';
-import type { Duel, NextData, NextRouter } from '../geoguessr/types';
-const errorSelector = '[class*="error_errorPage__"]';
+import { errorPage } from '../geoguessr/styles';
+import { summaryProps } from '../geoguessr/summary';
+import type { Duel, PageRouter, SummaryProps } from '../geoguessr/types';
+const summaryRoute = /\/(?:team-)?duels\/\$token\/summary\/?$/;
+const errorSelector = () => nativeSelector(errorPage, 'errorPage');
+/** GeoGuessr's loader state for the current summary page. */
+function summaryMatch(router: PageRouter | undefined) {
+  return router?.state?.matches?.find((match) => summaryRoute.test(match.routeId ?? ''));
+}
+/**
+ * Old duels make GeoGuessr's summary loader return 404 although the game server still
+ * has them. Re-run the route loader and answer its server-function request with the
+ * finished duel, so GeoGuessr renders its own summary page.
+ */
 export const summaryRecovery: Feature = {
   id: 'summary-recovery',
   name: 'Recover old duel summaries',
@@ -24,7 +37,7 @@ export const summaryRecovery: Feature = {
     const valid = (id: string, version: number) =>
       scope.active && visit === version && duelId() === id;
     function status(message: string) {
-      const errorPage = document.querySelector(errorSelector);
+      const errorPage = document.querySelector(errorSelector());
       if (!errorPage) return;
       let line = errorPage.querySelector<HTMLElement>('[data-summary-recovery]');
       if (!line) {
@@ -37,40 +50,33 @@ export const summaryRecovery: Feature = {
       }
       if (line.textContent !== message) line.textContent = message;
     }
-    async function repair(game: Duel, initial: NextData, router: NextRouter, version: number) {
-      const payload = nativeProps(initial, router.components?.[router.route]?.props, game);
-      const summaryPath =
-        location.pathname.match(/\/(?:team-)?duels\//)![0] + game.gameId + '/summary.json';
-      const originalUrl = location.pathname + location.search + location.hash;
-      const target = new URL(location.href);
-      target.pathname = target.pathname.replace(/\/?$/, '').replace(/(?:\/summary)?$/, '/summary');
-      target.searchParams.set('gg_summary_recovery', String(Date.now()));
+    async function repair(game: Duel, userId: string, router: PageRouter, version: number) {
+      const payload = summaryProps(game, userId, summaryMatch(router)?.loaderData?.props);
       let intercepted = false;
       const remove = scope.own(
         network.intercept((url) => {
           if (
-            valid(game.gameId, version) &&
-            url.origin === location.origin &&
-            url.pathname.includes('/_next/data/') &&
-            url.pathname.endsWith(summaryPath)
-          ) {
-            intercepted = true;
-            return new page.Response(JSON.stringify(payload), {
-              status: 200,
-              headers: { 'content-type': 'application/json' },
-            });
-          }
-          return undefined;
+            !valid(game.gameId, version) ||
+            url.origin !== location.origin ||
+            !url.pathname.startsWith('/_serverFn/')
+          )
+            return undefined;
+          // The loader request names its route and the page URL in a serialized payload.
+          const query = decodeURIComponent(url.search);
+          if (!/duels\/\[token\]\/summary/.test(query) || !query.includes(game.gameId))
+            return undefined;
+          intercepted = true;
+          return new page.Response(JSON.stringify(payload), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
         }),
       );
       let timer: ReturnType<typeof setTimeout> | undefined;
       let abort: (() => void) | undefined;
       try {
-        const result = await Promise.race([
-          router.replace(target.pathname + target.search + target.hash, undefined, {
-            shallow: false,
-            scroll: false,
-          }),
+        await Promise.race([
+          router.invalidate(),
           new Promise<never>((_, reject) => {
             timer = setTimeout(() => reject(new Error('Native recovery timed out.')), 12_000);
             abort = () => reject(new Error('Recovery disabled.'));
@@ -78,47 +84,39 @@ export const summaryRecovery: Feature = {
           }),
         ]);
         if (!valid(game.gameId, version)) return;
-        if (!intercepted || result === false) throw new Error('Native recovery did not complete.');
+        if (!intercepted) throw new Error('Native recovery did not complete.');
         await new Promise<void>((resolve) =>
           requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
         );
-        if (valid(game.gameId, version) && document.querySelector(errorSelector))
+        if (valid(game.gameId, version) && document.querySelector(errorSelector()))
           throw new Error('The summary is still unavailable.');
       } finally {
         clearTimeout(timer);
         if (abort) scope.signal.removeEventListener('abort', abort);
         remove();
-        // Also remove the temporary query parameter when disabled mid-recovery.
-        if (
-          visit === version &&
-          duelId() === game.gameId &&
-          location.pathname + location.search + location.hash ===
-            target.pathname + target.search + target.hash
-        )
-          page.history.replaceState(page.history.state, '', originalUrl);
       }
     }
     async function check() {
       const id = syncVisit(),
         version = visit,
-        router = page.next?.router;
-      if (!id || busy || attempted || !router?.isReady || !document.querySelector(errorSelector))
+        router = page.__TSR_ROUTER__;
+      const shown = document.querySelector(errorSelector());
+      if (!id || busy || attempted || !router || !shown) return;
+      if (!hydrated(shown)) {
+        setTimeout(() => scope.active && events.schedule(), 150);
         return;
+      }
       try {
-        const initial = JSON.parse(
-          document.getElementById('__NEXT_DATA__')?.textContent || '{}',
-        ) as NextData;
-        const current = router.components?.[router.route]?.props?.pageProps;
+        const props: SummaryProps | undefined = summaryMatch(router)?.loaderData?.props;
         const broken =
-          current?.statusCode === 404 ||
-          (initial.query?.token === id && initial.props?.pageProps?.statusCode === 404) ||
-          /Game not found|This game couldn't be found/i.test(document.body?.textContent || '');
+          props?.statusCode === 404 ||
+          /Game not found|couldn.t be found/i.test(document.body?.textContent || '');
         if (!broken) return;
         attempted = true;
         busy = true;
         status('Trying to display this summary…');
-        const game = await api.finishedDuel(id);
-        if (valid(id, version)) await repair(game, initial, router, version);
+        const [game, userId] = await Promise.all([api.finishedDuel(id), api.currentUserId()]);
+        if (valid(id, version)) await repair(game, userId, router, version);
       } catch (error) {
         if (valid(id, version)) {
           console.error('[BetterGEO summary recovery]', error);

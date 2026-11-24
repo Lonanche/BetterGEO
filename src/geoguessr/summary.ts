@@ -1,4 +1,4 @@
-import type { AppProps, Duel, NextData } from './types';
+import type { Duel, SummaryProps } from './types';
 export function summaryShape(game: Duel) {
   const options = game.options || {};
   // Exclude pre-generated locations for rounds which were never played.
@@ -21,6 +21,7 @@ export function summaryShape(game: Duel) {
       isTeamDuels: !!options.isTeamDuels,
       mapName: options.map?.name || 'Recovered duel',
       mapSlug: options.mapSlug || options.map?.slug,
+      maxRoundTime: options.maxRoundTime ?? 0,
       mode: options.movementOptions?.forbidRotating
         ? 'NoMoveNoZoom'
         : options.movementOptions?.forbidMoving
@@ -47,25 +48,7 @@ export function summaryShape(game: Duel) {
     })),
   };
 }
-export function nativeProps(
-  initial: NextData,
-  current: AppProps | undefined,
-  game: Duel,
-): AppProps & { __N_SSP: boolean; pageProps: NonNullable<AppProps['pageProps']> } {
-  // Preserve all _app contexts, including translations, locale, and account.
-  const shared = { ...initial.props, ...current };
-  return {
-    ...shared,
-    __N_SSP: true,
-    pageProps: {
-      ...initial.props?.pageProps,
-      ...current?.pageProps,
-      statusCode: 200,
-      game: summaryShape(game),
-      userId:
-        shared.accountProps?.account?.user?.userId ??
-        current?.pageProps?.userId ??
-        initial.props?.pageProps?.userId,
-    },
-  };
+/** Loader props for GeoGuessr's duel summary page, keeping any other props it returned. */
+export function summaryProps(game: Duel, userId: string, current: SummaryProps = {}): SummaryProps {
+  return { ...current, statusCode: 200, game: summaryShape(game), userId };
 }

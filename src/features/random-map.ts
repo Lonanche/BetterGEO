@@ -1,6 +1,7 @@
 import type { Feature } from '../core/feature';
 import { element } from '../core/dom';
 import { dropdownLists, menuEntry, insertMenuEntry } from '../core/navigation-menu';
+import { images } from '../geoguessr/styles';
 export const randomMap: Feature = {
   id: 'random-map',
   name: 'Random map in Singleplayer',
@@ -104,8 +105,7 @@ export const randomMap: Feature = {
         const icon = originalIcon
           ? (originalIcon.cloneNode(false) as HTMLImageElement)
           : element('img');
-        if (!originalIcon)
-          icon.src = '/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fmaps.4f8b2837.webp&w=128&q=75';
+        if (!originalIcon) icon.src = images.maps;
         icon.removeAttribute('id');
         icon.alt = '';
         icon.width = 56;

@@ -1,7 +1,6 @@
 import { historyResponse, finishedDuelResponse } from './responses';
 import { countryCodes } from './countries';
 import { ScoreIndex } from './scores';
-import { RaceTrackerClient } from './race-tracker';
 import type {
   Duel,
   GameHistory,
@@ -36,11 +35,7 @@ export class RequestCache {
 export class GeoGuessrApi {
   readonly scores = new ScoreIndex();
   private cache = new RequestCache();
-  private raceTracker = new RaceTrackerClient();
   constructor(private page: PageWindow) {}
-  onlineRacePlayers(signal?: AbortSignal, force = false) {
-    return this.raceTracker.get(signal, force);
-  }
   private async json(path: string, label: string, options: RequestInit = {}): Promise<unknown> {
     const response = await this.page.fetch(path, {
       credentials: 'same-origin',
@@ -66,6 +61,19 @@ export class GeoGuessrApi {
     )
       throw new Error('Unexpected random map URL.');
     return url.href;
+  }
+  /** The signed-in account's user ID. */
+  currentUserId(): Promise<string> {
+    return this.cache.get('current-user', async () => {
+      const data = await this.json('/api/v3/profiles/', 'Account API');
+      const user =
+        data && typeof data === 'object' && 'user' in data
+          ? (data.user as Record<string, unknown> | null)
+          : undefined;
+      const id = user?.id ?? user?.userId;
+      if (typeof id !== 'string' || !id) throw new Error('Sign in to recover this summary.');
+      return id;
+    });
   }
   userStatus(userId: string): Promise<UserModerationStatus> {
     return this.cache.get(`user-status:${userId}`, async () => {

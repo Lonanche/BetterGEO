@@ -4,6 +4,8 @@ import { profileWidget } from '../core/profile-widget';
 import { countryName } from '../geoguessr/countries';
 import { watchProfile, profileWidgets } from '../core/profile';
 import type { RankedCountryStats } from '../geoguessr/types';
+import { nativeSelector } from '../core/native-styles';
+import { images, profile, widget } from '../geoguessr/styles';
 export const countryPerformance: Feature = {
   id: 'country-performance',
   name: 'Country ranked stats',
@@ -29,7 +31,7 @@ export const countryPerformance: Feature = {
         const ranked = [...container.querySelectorAll('h2')].find((heading) =>
           /^ranked (?:duels|solo)$/i.test(heading.textContent?.trim() ?? ''),
         );
-        const rankedRow = ranked?.closest('[class*="profile-v2_widgetRow__"]');
+        const rankedRow = ranked?.closest(nativeSelector(profile, 'widgetRow'));
         if (rankedRow && container.contains(rankedRow)) rankedRow.after(widget);
         else container.prepend(widget);
       },
@@ -41,18 +43,20 @@ function countryPerformanceView(data: RankedCountryStats) {
   const rankedHeading = [...document.querySelectorAll('h2')].find((heading) =>
     /^ranked (?:duels|solo)$/i.test(heading.textContent?.trim() ?? ''),
   );
-  const nativeIcon = rankedHeading?.closest('[class*="widget_title__"]')?.querySelector('img');
+  const nativeIcon = rankedHeading?.closest(nativeSelector(widget, 'title'))?.querySelector('img');
   const icon = nativeIcon ? (nativeIcon.cloneNode(false) as HTMLImageElement) : element('img');
-  if (!nativeIcon)
-    icon.src =
-      '/_next/image?url=%2F_next%2Fstatic%2Fmedia%2Fgamemode-duels.f0444913.webp&w=256&q=75';
+  if (!nativeIcon) icon.src = images.rankedDuels;
   icon.removeAttribute('id');
   icon.alt = '';
   icon.width = 40;
   icon.height = 40;
   icon.loading = 'lazy';
-  const { root, body, inner, header, content } = profileWidget('Country ranked stats', icon);
+  const { root, body, inner, header, titleRow, content } = profileWidget(
+    'Country ranked stats',
+    icon,
+  );
   header.classList.add('bettergeo-country-header');
+  titleRow.classList.add('bettergeo-country-title');
   content.append(element('small', 'bettergeo-country-credit', 'Ranked Solo · BetterGEO'));
   root.id = 'bettergeo-country-performance';
   root.classList.add('bettergeo-country-performance');
@@ -104,7 +108,7 @@ const CSS = `
 .bettergeo-country-header {
   padding: 10px 12px;
 }
-.bettergeo-country-header [class*='widget_header__'] {
+.bettergeo-country-title {
   display: flex;
   align-items: center;
   gap: 10px;
